@@ -408,7 +408,7 @@ class SHAPAnalysis:
             plt.close()
         print(f"Saved overall contribution plots for to {overall_contrib_folder}")
 
-    def _plot_shap_contributions_over_time(self, shap_values):
+    def _plot_shap_contributions_over_time(self, shap_values): # TODO: duplicate function (the second one plots per feature)
         n_dynamic = len(self.dynamic_features)
         dynamic_shap_values = shap_values[:, :self.seq_length * n_dynamic].reshape(-1, self.seq_length, n_dynamic)
         median_shap_values = np.median(np.abs(dynamic_shap_values), axis=0)  # Shape: [seq_length, n_dynamic]
