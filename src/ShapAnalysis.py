@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 from collections import defaultdict
 import shap
+torch.backends.cudnn.enabled = False
 
 from neuralhydrology.utils.config import Config
 from neuralhydrology.modelzoo.cudalstm import CudaLSTM
@@ -256,9 +257,6 @@ class SHAPAnalysis:
         # Clean up
         torch.cuda.empty_cache()
 
-        # Example of saving a default visualization
-        self._plot_shap_summary(shap_values, {"x_d": final_x_d, "x_s": final_x_s})
-
         return shap_values, {"x_d": final_x_d, "x_s": final_x_s}
 
     def _aggregate_shap_values(self, shap_values, x_s=None):
@@ -360,7 +358,7 @@ class SHAPAnalysis:
         plt.close()
         print(f"Summary plot saved to {summary_plot_path}")
 
-    def _plot_shap_contributions_over_time(self, shap_values): # TODO: duplicate function (the second one plots per feature)
+    def _plot_shap_contributions_over_time(self, shap_values): 
         """
         Generate a plot showing the overall contribution of each dynamic feature to the prediction over time.
 
@@ -375,9 +373,6 @@ class SHAPAnalysis:
 
         # Calculate the median absolute SHAP value for each feature over all samples
         median_shap_values = np.median(np.abs(dynamic_shap_values), axis=0)  # Shape: [seq_length, n_dynamic]
-
-        overall_contrib_folder = os.path.join(self.results_folder, "shap_overall_contrib")
-        os.makedirs(overall_contrib_folder, exist_ok=True)
 
         # Create a single plot
         plt.figure(figsize=(15, 8))
@@ -399,7 +394,7 @@ class SHAPAnalysis:
         plt.grid(True)
 
         # Save the combined plot
-        plot_path = os.path.join(overall_contrib_folder, "overall_shap_contribution_combined.png")
+        plot_path = os.path.join(self.results_folder, "overall_shap_contribution_combined.png")
         plt.savefig(plot_path, bbox_inches="tight", dpi=300)
         plt.close()
 
@@ -518,16 +513,16 @@ class SHAPAnalysis:
     def run_shap_visualizations(self, shap_values, inputs):
         self._plot_shap_summary(shap_values, {"x_d": inputs["x_d"], "x_s": inputs["x_s"]})
         self._plot_shap_contributions_over_time(shap_values)
-        self._plot_shap_individual_samples(shap_values)
         self._plot_shap_summary_bar(shap_values)
+        # self._plot_shap_individual_samples(shap_values)
 
 
 
 def main():
     parser = argparse.ArgumentParser(description="Run SHAP analysis.")
-    parser.add_argument('--run_dir', type=str, required=True, help='Path to the run directory.')
+    parser.add_argument('--run-dir', type=str, required=True, help='Path to the run directory.')
     parser.add_argument('--epoch', type=int, required=True, help='Which epoch checkpoint to load.')
-    parser.add_argument('--num_samples', type=int, default=100000,
+    parser.add_argument('--num-samples', type=int, default=100000,
                         help='Number of samples to use for SHAP analysis.')
     parser.add_argument('--reuse-shap', action='store_true',
                         help='If set, reuse shap_values.npy and inputs.npz if they exist, skipping new computation.')
@@ -557,4 +552,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
