@@ -10,7 +10,6 @@ from tqdm import tqdm
 from collections import defaultdict
 import shap
 
-# neuralhydrology imports
 from neuralhydrology.utils.config import Config
 from neuralhydrology.modelzoo.cudalstm import CudaLSTM
 
@@ -361,57 +360,22 @@ class SHAPAnalysis:
         plt.close()
         print(f"Summary plot saved to {summary_plot_path}")
 
-    def _plot_shap_contributions_over_time_1(self, shap_values):
+    def _plot_shap_contributions_over_time(self, shap_values): # TODO: duplicate function (the second one plots per feature)
         """
         Generate a plot showing the overall contribution of each dynamic feature to the prediction over time.
 
         Args:
             shap_values (np.ndarray): SHAP values array of shape [n_samples, seq_length * num_dynamic + num_static].
-            inputs (dict): Dictionary with keys "x_d" (dynamic inputs) and "x_s" (static inputs).
         Returns:
             None
         """
-
         n_dynamic = len(self.dynamic_features)
-
         # Extract dynamic SHAP values
         dynamic_shap_values = shap_values[:, :self.seq_length * n_dynamic].reshape(-1, self.seq_length, n_dynamic)
 
         # Calculate the median absolute SHAP value for each feature over all samples
         median_shap_values = np.median(np.abs(dynamic_shap_values), axis=0)  # Shape: [seq_length, n_dynamic]
 
-        # Create a new subfolder for these plots
-        overall_contrib_folder = os.path.join(self.results_folder, "shap_overall_contrib")
-        os.makedirs(overall_contrib_folder, exist_ok=True)
-
-        for feature_idx, feature_name in enumerate(self.dynamic_features):
-            plt.figure(figsize=(15, 6))
-            
-            # Plot the mean SHAP values over time for the current feature
-            plt.plot(
-                np.arange(-self.seq_length, 0),
-                median_shap_values[:, feature_idx], 
-                label=f"Overall SHAP Contribution for {feature_name}",
-                color='b'
-            )
-
-            plt.xticks(np.arange(-self.seq_length, 1, 50))
-            plt.title(f"Overall Contribution of {feature_name} to Prediction Over Time")
-            plt.xlabel("Time Step")
-            plt.ylabel("Mean Absolute SHAP Value")
-            plt.legend(loc="upper left")
-            plt.grid(True)
-
-            # Save plot
-            plot_path = os.path.join(overall_contrib_folder, f"overall_shap_contribution_{feature_name}.png")
-            plt.savefig(plot_path, bbox_inches="tight", dpi=300)
-            plt.close()
-        print(f"Saved overall contribution plots for to {overall_contrib_folder}")
-
-    def _plot_shap_contributions_over_time(self, shap_values): # TODO: duplicate function (the second one plots per feature)
-        n_dynamic = len(self.dynamic_features)
-        dynamic_shap_values = shap_values[:, :self.seq_length * n_dynamic].reshape(-1, self.seq_length, n_dynamic)
-        median_shap_values = np.median(np.abs(dynamic_shap_values), axis=0)  # Shape: [seq_length, n_dynamic]
         overall_contrib_folder = os.path.join(self.results_folder, "shap_overall_contrib")
         os.makedirs(overall_contrib_folder, exist_ok=True)
 
@@ -554,8 +518,8 @@ class SHAPAnalysis:
     def run_shap_visualizations(self, shap_values, inputs):
         self._plot_shap_summary(shap_values, {"x_d": inputs["x_d"], "x_s": inputs["x_s"]})
         self._plot_shap_contributions_over_time(shap_values)
-#        self._plot_shap_individual_samples(shap_values)
-#        self._plot_shap_summary_bar(shap_values)
+        self._plot_shap_individual_samples(shap_values)
+        self._plot_shap_summary_bar(shap_values)
 
 
 
