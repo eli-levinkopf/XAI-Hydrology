@@ -180,7 +180,7 @@ class IntegratedGradientsAnalysis(ExplainabilityBase):
         summed_ig_dyn = self._sum_ig_dynamic_over_time(ig_dyn)
 
         # Aggregate static
-        aggregated_ig_stat, _, agg_stat_names = self._aggregate_static_features(ig_stat)
+        aggregated_ig_stat, agg_stat_names = self._aggregate_static_features(ig_stat)
 
         # Combine
         combined_ig = np.hstack([summed_ig_dyn, aggregated_ig_stat])
