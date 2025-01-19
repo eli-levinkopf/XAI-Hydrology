@@ -5,17 +5,19 @@ import numpy as np
 from tqdm import tqdm
 import pandas as pd
 import yaml
-import re
 import matplotlib.pyplot as plt
+from SALib.analyze import sobol, morris
 from adjustText import adjust_text
 from SALib.sample.sobol import sample
 from SALib.sample.morris import sample as morris_sample
-from SALib.analyze import sobol, morris
+import argparse
+import logging
+
 from neuralhydrology.modelzoo.ealstm import EALSTM
+from neuralhydrology.modelzoo.cudalstm import CudaLSTM
 from neuralhydrology.utils.config import Config
 
 sys.path.append("/sci/labs/efratmorin/eli.levinkopf/neuralhydrology")
-# sys.path.append("/sci/labs/efratmorin/omer_roi_cohen/neuralhydrology")
 
 METADATA_PATH = "/sci/labs/efratmorin/eli.levinkopf/batch_runs/metadata"
 BASE_SAMPLE_SIZE = 2048
@@ -26,8 +28,9 @@ DATA_DIR = "/sci/labs/efratmorin/lab_share/FloodsML/data/Caravan/timeseries/csv"
 ATTRIBUTES_DIR = "/sci/labs/efratmorin/lab_share/FloodsML/data/Caravan/attributes"
 
 class SensitivityAnalysis:
-    def __init__(self, model_path, analysis_type="both", method="morris"):
-        self.model_path = model_path
+    def __init__(self, run_dir, epoch, analysis_type="both", method="morris"):
+        self.run_dir = run_dir
+        self.epoch = epoch
         self.cfg = self._load_config()
         self.seed = self.cfg.get('seed', 42)
         self._set_seed(self.seed)
@@ -73,9 +76,12 @@ class SensitivityAnalysis:
             torch.cuda.manual_seed_all(seed)
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False
-
+    
     def _load_config(self):
-        config_path = os.path.join(os.path.dirname(self.model_path), 'config.yml')
+        """Load the 'config.yml' into a Python dict."""
+        config_path = os.path.join(self.run_dir, 'config.yml')
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Could not find 'config.yml' at {config_path}")
         with open(config_path, 'r') as f:
             cfg = yaml.safe_load(f)
         return cfg
@@ -136,20 +142,20 @@ class SensitivityAnalysis:
         config = Config(self.cfg)
         model_class_name = self.cfg['model'].lower()
         if model_class_name == 'cudalstm':
-            from neuralhydrology.modelzoo.cudalstm import CudaLSTM
             model = CudaLSTM(cfg=config)
         elif model_class_name == 'ealstm':
             model = EALSTM(cfg=config)
         else:
             raise ValueError(f"Model {model_class_name} is not supported.")
         map_location = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model.load_state_dict(torch.load(self.model_path, map_location=map_location))
+        model_path = os.path.join(self.run_dir, f"model_epoch{self.epoch:03d}.pt")
+        model.load_state_dict(torch.load(model_path, map_location=map_location))
         model.to(map_location)
         model.eval()
         return model
 
     def _load_normalization_statistics_from_scaler_file(self):
-        scaler_path = os.path.join(os.path.dirname(self.model_path), 'train_data/train_data_scaler.yml')
+        scaler_path = os.path.join(self.run_dir, 'train_data/train_data_scaler.yml')
         with open(scaler_path, 'r') as f:
             scaler = yaml.safe_load(f)
 
@@ -343,16 +349,16 @@ class SensitivityAnalysis:
         return df
 
     def _save_and_visualize_results(self, df):
-        print(df.to_string(index=False, float_format='{:,.2f}'.format))
-        output_dir = os.path.join(os.path.dirname(self.model_path), 'sensitivity_analysis_results')
+        logging.debug(df.to_string(index=False, float_format='{:,.2f}'.format))
+        output_dir = os.path.join(self.run_dir, 'sensitivity_analysis_results')
         os.makedirs(output_dir, exist_ok=True)
 
         output_file = os.path.join(
             output_dir,
-            f"sensitivity_results_{os.path.basename(self.model_path).split('.')[0]}_{self.method}_{self.analysis_type}.csv"
+            f"sensitivity_results_epoch{self.epoch}_{self.method}_{self.analysis_type}.csv"
         )
         df.to_csv(output_file, index=False, float_format='%.2f')
-        print(f"Sensitivity analysis results saved to: {output_file}")
+        logging.info(f"Sensitivity analysis results saved to: {output_file}")
 
         if self.method == "morris":
             df = df.sort_values(by='Mu*', ascending=False)
@@ -380,10 +386,9 @@ class SensitivityAnalysis:
                 ax.set_xlabel("Value")
                 ax.grid(True, linestyle='--', alpha=0.5)
             
-            morris_path = os.path.join(output_dir, f"morris_sensitivity_bar_{os.path.basename(self.model_path).split('.')[0]}_{self.analysis_type}.png")
+            morris_path = os.path.join(output_dir, f"sensitivity_analysis_morris_bar_epoch{self.epoch}_{self.analysis_type}.png")
             plt.savefig(morris_path, dpi=300, bbox_inches='tight')
-            print(f"Horizontal bar plots saved to: {morris_path}")
-            plt.show()
+            logging.info(f"Horizontal bar plots saved to: {morris_path}")
 
             # Scatter Plot
             plt.figure(figsize=(8, 6))
@@ -395,9 +400,9 @@ class SensitivityAnalysis:
             plt.title("Morris Sensitivity Analysis")
             plt.grid(alpha=0.3)
             plt.tight_layout()
-            scatter_path = os.path.join(output_dir, f"morris_sensitivity_scatter_{os.path.basename(self.model_path).split('.')[0]}_{self.analysis_type}.png")
+            scatter_path = os.path.join(output_dir, f"morris_sensitivity_scatter_epoch{self.epoch}_{self.analysis_type}.png")
             plt.savefig(scatter_path, dpi=300, bbox_inches='tight')
-            plt.show()
+            logging.info(f"Scatter plot saved to: {scatter_path}")
         elif self.method == "sobol":
             # Sobol Bar Plots
             fig, axes = plt.subplots(2, 1, figsize=(10, 10), sharex=True)
@@ -412,9 +417,9 @@ class SensitivityAnalysis:
 
             plt.xticks(rotation=45, ha='right')
             plt.tight_layout()
-            sobol_path = os.path.join(output_dir, f"sobol_sensitivity_analysis_{os.path.basename(self.model_path).split('.')[0]}_{self.analysis_type}.png")
+            sobol_path = os.path.join(output_dir, f"sobol_sensitivity_analysis_epoch{self.epoch}_{self.analysis_type}.png")
             plt.savefig(sobol_path, dpi=300, bbox_inches='tight')
-            print(f"Sobol sensitivity analysis plot saved to: {sobol_path}")
+            logging.info(f"Sobol sensitivity analysis plot saved to: {sobol_path}")
             plt.show()
 
     def run_sensitivity_analysis(self):
@@ -425,14 +430,16 @@ class SensitivityAnalysis:
 
 
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="Run Sensitivity Analysis on EA-LSTM model.")
-    parser.add_argument("model_path", type=str, help="Path to the trained model file (e.g., model_epoch060.pt)")
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    
+    parser = argparse.ArgumentParser(description="Run Sensitivity Analysis")
+    parser.add_argument('--run_dir', type=str, required=True, help='Path to the run directory.')
+    parser.add_argument('--epoch', type=int, required=True, help='Which epoch checkpoint to load.')
     parser.add_argument("--analysis_type", type=str, choices=["dynamic", "static", "both"], default="both",
                         help="Type of sensitivity analysis to perform: 'dynamic', 'static', or 'both'")
-    parser.add_argument("--method", type=str, choices=["sobol", "morris"], default="sobol",
+    parser.add_argument("--method", type=str, choices=["sobol", "morris"], default="morris",
                         help="Sensitivity analysis method: 'sobol' or 'morris'")
     args = parser.parse_args()
 
-    sa = SensitivityAnalysis(model_path=args.model_path, analysis_type=args.analysis_type, method=args.method)
+    sa = SensitivityAnalysis(run_dir=args.run_dir, epoch=args.epoch, analysis_type=args.analysis_type, method=args.method)
     sa.run_sensitivity_analysis()

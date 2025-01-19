@@ -89,7 +89,22 @@ class SHAPAnalysis(ExplainabilityBase):
         return shap_values, {"x_d": final_x_d, "x_s": final_x_s}
 
     def _plot_shap_summary(self, shap_values, inputs):
-        """Example SHAP summary visualization with separate x_d and x_s."""
+        """
+        Generate and save a SHAP summary plot, separating dynamic and static feature contributions.
+
+        This function visualizes the SHAP values for both dynamic and static features. 
+        It aggregates static feature attributions and sums dynamic feature attributions over time.
+        The final SHAP summary plot is saved as a PNG file.
+
+        Args:
+            shap_values (np.ndarray): SHAP values for all features, shape [n_samples, n_features].
+            inputs (dict): A dictionary containing:
+                - "x_d" (np.ndarray): Dynamic input values, shape [n_samples, seq_length, n_dynamic].
+                - "x_s" (np.ndarray): Static input values, shape [n_samples, n_static].
+
+        Returns:
+            None: The function saves the SHAP summary plot as an image file.
+        """
         shap_values = shap_values.squeeze(-1)
         
         x_d = inputs["x_d"]  # [n_samples, seq_length, n_dynamic]
@@ -129,33 +144,42 @@ class SHAPAnalysis(ExplainabilityBase):
         plt.close()
         logging.info(f"Summary plot saved to {summary_plot_path}")
 
-    def _plot_shap_contributions_over_time(self, shap_values):
+    def _plot_shap_contributions_over_time(self, shap_values, last_n_days=None):
         """
         Generate a plot showing the overall contribution of each dynamic feature to the prediction over time.
 
         Args:
             shap_values (np.ndarray): SHAP values array of shape [n_samples, seq_length * num_dynamic + num_static].
+            last_n_days (int, optional): Number of last days to display in the plot. Defaults to seq_length.
         """
+        if last_n_days is None:
+            last_n_days = self.seq_length
+
         n_dynamic = len(self.dynamic_features)
         dynamic_shap_values = shap_values[:, :self.seq_length * n_dynamic].reshape(-1, self.seq_length, n_dynamic)
         median_shap_values = np.median(np.abs(dynamic_shap_values), axis=0)  # [seq_length, n_dynamic]
 
+        # Slice the last `last_n_days`
+        days_to_plot = min(last_n_days, self.seq_length)
+        median_shap_values = median_shap_values[-days_to_plot:]  # Take the last `days_to_plot` days
+        time_steps = np.arange(-days_to_plot, 0)  # Adjust x-axis accordingly
+
         plt.figure(figsize=(15, 8))
         for feature_idx, feature_name in enumerate(self.dynamic_features):
             plt.plot(
-                np.arange(-self.seq_length, 0),
+                time_steps,
                 median_shap_values[:, feature_idx],
                 label=f"{feature_name}"
             )
 
-        plt.xticks(np.arange(-self.seq_length, 1, 50))
-        plt.title("Overall Contribution of Dynamic Features to Prediction Over Time")
+        plt.xticks(np.arange(-days_to_plot, 1, max(10, days_to_plot // 7)))  # Dynamically adjust tick spacing
+        plt.title(f"Overall Contribution of Dynamic Features to Prediction Over Time")
         plt.xlabel("Time Step")
         plt.ylabel("Mean Absolute SHAP Value")
         plt.legend(loc="upper left", bbox_to_anchor=(1, 1))
         plt.grid(True)
 
-        plot_path = os.path.join(self.results_folder, "overall_shap_contribution_combined.png")
+        plot_path = os.path.join(self.results_folder, "shap_overall_contribution_combined.png")
         plt.savefig(plot_path, bbox_inches="tight", dpi=300)
         plt.close()
         logging.info(f"Saved overall contribution plot to {plot_path}")
@@ -171,9 +195,9 @@ class SHAPAnalysis(ExplainabilityBase):
         dynamic_shap_values = shap_values[:, :self.seq_length * num_dynamic].reshape(-1, self.seq_length, num_dynamic)
         static_shap_values = shap_values[:, self.seq_length * num_dynamic:]
 
-        # Sum SHAP values across time steps and then average
-        dynamic_summed_shap = np.sum(np.abs(dynamic_shap_values), axis=1)
-        dynamic_mean_shap = np.mean(dynamic_summed_shap, axis=0)
+        # Sum SHAP values across time steps and then average across samples for dynamic features
+        dynamic_summed_shap = np.sum(np.abs(dynamic_shap_values), axis=1) # Shape: [n_samples, num_dynamic]
+        dynamic_mean_shap = np.mean(dynamic_summed_shap, axis=0) # Shape: [num_dynamic]
 
         combined_static_shap, agg_static_names = self._aggregate_static_features(static_shap_values)
         static_mean_shap = np.mean(np.abs(combined_static_shap), axis=0).squeeze()
