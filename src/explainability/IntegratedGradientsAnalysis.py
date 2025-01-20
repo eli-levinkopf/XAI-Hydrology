@@ -41,17 +41,24 @@ class IntegratedGradientsAnalysis(ExplainabilityBase):
         Returns:
             torch.Tensor: Integrated gradients w.r.t. each input feature, shape [batch, num_features].
         """
+        # 1) If there's a single baseline row but multiple inputs, repeat the baseline
         if baseline.shape[0] == 1 and inputs.shape[0] > 1:
             baseline = baseline.repeat(inputs.shape[0], 1)
 
+        # 2) Prepare a tensor to store gradients at each step and create a list of interpolation alphas from 0 to 1
         grads = torch.zeros(steps, *inputs.shape, device=inputs.device)
         alphas = torch.linspace(0.0, 1.0, steps, device=inputs.device)
 
+        # 3) Loop over these alphas
         for i, alpha in enumerate(alphas):
+            # 3a) Interpolate input: x(α) = x0 + α(x - x0)
             interpolated_input = baseline + alpha * (inputs - baseline)
             interpolated_input.requires_grad_(True)
 
+            # 3b) Compute model output for this interpolated input
             output = model(interpolated_input).sum()
+
+            # 3c) Compute gradients of output w.r.t. input
             grad = torch.autograd.grad(
                 outputs=output,
                 inputs=interpolated_input,
@@ -60,8 +67,12 @@ class IntegratedGradientsAnalysis(ExplainabilityBase):
             )[0]
             grads[i] = grad
 
+        # 4) Average gradients across all steps
         avg_grads = grads.mean(dim=0)
+        
+        # 5) Compute the final IG by multiplying avg grads by (inputs - baseline)
         ig = (inputs - baseline) * avg_grads
+        
         return ig
 
     def run_integrated_gradients(self):
