@@ -176,7 +176,7 @@ class SHAPAnalysis(ExplainabilityBase):
         plt.title(f"Overall Contribution of Dynamic Features to Prediction Over Time")
         plt.xlabel("Time Step")
         plt.ylabel("Mean Absolute SHAP Value")
-        plt.legend(loc="upper left", bbox_to_anchor=(1, 1))
+        plt.legend(loc="upper left", fontsize=10, frameon=True)
         plt.grid(True)
 
         plot_path = os.path.join(self.results_folder, "shap_overall_contribution_combined.png")
