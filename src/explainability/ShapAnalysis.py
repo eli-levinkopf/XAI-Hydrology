@@ -184,7 +184,7 @@ class SHAPAnalysis(ExplainabilityBase):
         plt.close()
         logging.info(f"Saved overall contribution plot to {plot_path}")
 
-    def _plot_shap_summary_bar(self, shap_values):
+    def _plot_shap_summary_bar1(self, shap_values):
         """
         Generate a SHAP Summary Bar Plot showing the average absolute SHAP values for each feature.
 
@@ -215,6 +215,72 @@ class SHAPAnalysis(ExplainabilityBase):
         plt.xlabel("Mean Absolute SHAP Value")
         plt.title("SHAP Summary Bar Plot")
         plt.gca().invert_yaxis()
+        plot_path = os.path.join(self.results_folder, "shap_summary_bar_plot.png")
+        plt.savefig(plot_path, bbox_inches="tight", dpi=300)
+        plt.close()
+        logging.info(f"SHAP Summary Bar Plot saved to {plot_path}")
+
+    def _plot_shap_summary_bar(self, shap_values):
+        """
+        Generate a SHAP Summary Bar Plot showing the average absolute SHAP values for each feature,
+        but now using shap.plots.bar for the final visualization.
+
+        Args:
+            shap_values (np.ndarray): SHAP values array of shape [n_samples, seq_length * num_dynamic + num_static].
+        """
+        import shap  # Just to highlight we need shap here
+
+        # 1) Same aggregation logic as before
+        num_dynamic = len(self.dynamic_features)
+
+        # Split into dynamic vs. static
+        dynamic_shap_values = shap_values[:, :self.seq_length * num_dynamic].reshape(-1, self.seq_length, num_dynamic)
+        static_shap_values = shap_values[:, self.seq_length * num_dynamic:]
+
+        # Sum SHAP values across time steps for dynamic features
+        dynamic_summed_shap = np.sum(np.abs(dynamic_shap_values), axis=1)  # [n_samples, num_dynamic]
+        # Or if you do NOT want absolute values here, remove the np.abs(...)
+        dynamic_mean_shap = np.mean(dynamic_summed_shap, axis=0)  # [num_dynamic]
+
+        # Aggregate static features
+        combined_static_shap, agg_static_names = self._aggregate_static_features(static_shap_values)
+        static_mean_shap = np.mean(np.abs(combined_static_shap), axis=0).squeeze()
+
+        # Create final vectors
+        feature_names = self.dynamic_features + agg_static_names
+        mean_shap_values = np.concatenate([dynamic_mean_shap, static_mean_shap])  # shape: [num_features]
+        
+        # 2) Build an Explanation object (or pass array + names)
+        # We want a 2D array: [n_samples, n_features]. But here, we only have
+        #  a single "mean" number per feature. A simple trick is to replicate these
+        #  mean values for each sample, or create a new "fake" shap array. If we
+        #  replicate them, shap.bar will compute the average again (which is
+        #  redundant). Alternatively, we can just treat each feature as one row
+        #  in a matrix and pass that in.
+        # 
+        # For a "global bar plot," shap.plots.bar needs shape [n_samples, n_features].
+        # If you only have a single importance value for each feature, you can do:
+        aggregated_shap = np.tile(mean_shap_values, (1, 1))  # shape: (1, n_features)
+        # Alternatively: aggregated_shap = mean_shap_values[np.newaxis, :]
+        # This gives one row with your aggregated values.
+
+        # Make a shap.Explanation object
+        # (base_values, data, etc. can be set to None or dummy values if not relevant)
+        explanation = shap.Explanation(
+            values=aggregated_shap,
+            feature_names=feature_names
+        )
+
+        # 3) Plot using shap.plots.bar
+        plt.figure(figsize=(12, 8))
+        # By default it sorts by absolute values, which is what we want for a global bar plot
+        shap.plots.bar(explanation, max_display=len(feature_names), show=False)
+
+        # Override the x-label, but shap generally sets it automatically
+        # plt.xlabel("Mean Absolute SHAP Value")
+        # plt.title("SHAP Summary Bar Plot (Aggregated)")
+
+        # Save and close
         plot_path = os.path.join(self.results_folder, "shap_summary_bar_plot.png")
         plt.savefig(plot_path, bbox_inches="tight", dpi=300)
         plt.close()
