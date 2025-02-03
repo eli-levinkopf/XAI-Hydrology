@@ -210,10 +210,6 @@ class SHAPAnalysis(ExplainabilityBase):
         sorted_features = [feature_names[i] for i in sorted_indices]
         sorted_shap_values = mean_shap_values[sorted_indices]
 
-        logging.info("Ordered features and their mean SHAP values:")
-        for feature, value in zip(sorted_features, sorted_shap_values):
-            logging.info(f"{feature}: {value:.5f}")
-
         plt.figure(figsize=(12, 8))
         plt.barh(sorted_features, sorted_shap_values, color='skyblue')
         plt.xlabel("Mean Absolute SHAP Value")

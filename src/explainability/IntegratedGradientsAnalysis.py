@@ -161,10 +161,6 @@ class IntegratedGradientsAnalysis(ExplainabilityBase):
         sorted_idx = np.argsort(scores)[::-1]
         sorted_scores = scores[sorted_idx]
         sorted_feature_names = [feature_names[i] for i in sorted_idx]
-        
-        if use_abs:
-            for feature, value in zip(sorted_feature_names, sorted_scores):
-                logging.info(f"{feature}: |{value:.5f}|")
 
         plt.figure(figsize=(8, 6))
         plt.barh(range(len(sorted_scores)), sorted_scores, color='skyblue')
