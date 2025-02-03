@@ -164,7 +164,7 @@ class IntegratedGradientsAnalysis(ExplainabilityBase):
         
         if use_abs:
             for feature, value in zip(sorted_feature_names, sorted_scores):
-                logging.info(f"{feature}: |{value:.2f}|")
+                logging.info(f"{feature}: |{value:.5f}|")
 
         plt.figure(figsize=(8, 6))
         plt.barh(range(len(sorted_scores)), sorted_scores, color='skyblue')
