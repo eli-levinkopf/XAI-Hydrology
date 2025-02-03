@@ -348,7 +348,6 @@ class SensitivityAnalysis:
         return df
 
     def _save_and_visualize_results(self, df):
-        logging.debug(df.to_string(index=False, float_format='{:,.2f}'.format))
         output_dir = os.path.join(self.run_dir, 'sensitivity_analysis_results')
         os.makedirs(output_dir, exist_ok=True)
 
