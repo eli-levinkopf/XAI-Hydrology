@@ -222,18 +222,18 @@ class SHAPAnalysis(ExplainabilityBase):
         static_shap_values = shap_values[:, self.seq_length * num_dynamic:]
 
         # Sum SHAP values across time steps and then average across samples for dynamic features
-        # dynamic_summed_shap = np.sum(np.abs(dynamic_shap_values), axis=1) # Shape: [n_samples, num_dynamic]
-        # dynamic_mean_shap = np.mean(dynamic_summed_shap, axis=0) # Shape: [num_dynamic]
+        dynamic_summed_shap = np.sum(np.abs(dynamic_shap_values), axis=1) # Shape: [n_samples, num_dynamic]
+        dynamic_mean_shap = np.mean(dynamic_summed_shap, axis=0) # Shape: [num_dynamic]
 
-        # combined_static_shap, agg_static_names = self._aggregate_static_features(static_shap_values)
-        # static_mean_shap = np.mean(np.abs(combined_static_shap), axis=0).squeeze()
+        combined_static_shap, agg_static_names = self._aggregate_static_features(static_shap_values)
+        static_mean_shap = np.mean(np.abs(combined_static_shap), axis=0).squeeze()
 
         # ====
 
-        dynamic_summed_shap = np.sum(dynamic_shap_values, axis=1)
-        dynamic_mean_shap = np.mean(dynamic_summed_shap, axis=0)
-        combined_static_shap, agg_static_names = self._aggregate_static_features(static_shap_values)
-        static_mean_shap = np.mean(combined_static_shap, axis=0).squeeze()
+        # dynamic_summed_shap = np.sum(dynamic_shap_values, axis=1)
+        # dynamic_mean_shap = np.mean(dynamic_summed_shap, axis=0)
+        # combined_static_shap, agg_static_names = self._aggregate_static_features(static_shap_values)
+        # static_mean_shap = np.mean(combined_static_shap, axis=0).squeeze()
 
         # ====
 
