@@ -185,32 +185,6 @@ class SHAPAnalysis(ExplainabilityBase):
         logging.info(f"Saved overall contribution plot to {plot_path}")
 
     def _plot_shap_summary_bar(self, shap_values):
-        num_dynamic = len(self.dynamic_features)
-        dynamic_shap_values = shap_values[:, :self.seq_length * num_dynamic].reshape(-1, self.seq_length, num_dynamic)
-        static_shap_values = shap_values[:, self.seq_length * num_dynamic:]
-        dynamic_summed_shap = np.sum(dynamic_shap_values, axis=1)
-        dynamic_mean_shap = np.mean(dynamic_summed_shap, axis=0)
-        combined_static_shap, agg_static_names = self._aggregate_static_features(static_shap_values)
-        static_mean_shap = np.mean(combined_static_shap, axis=0).squeeze()
-        feature_names = self.dynamic_features + agg_static_names
-        mean_shap_values = np.concatenate([dynamic_mean_shap, static_mean_shap])
-        sorted_indices = np.argsort(mean_shap_values)[::-1]
-        sorted_features = [feature_names[i] for i in sorted_indices]
-        sorted_shap_values = mean_shap_values[sorted_indices]
-        logging.info("Ordered features and their mean SHAP values:")
-        for feature, value in zip(sorted_features, sorted_shap_values):
-            logging.info(f"{feature}: {value:.2f}")
-        plt.figure(figsize=(12, 8))
-        plt.barh(sorted_features, sorted_shap_values, color='skyblue')
-        plt.xlabel("Mean SHAP Value")
-        plt.title("SHAP Summary Bar Plot")
-        plt.gca().invert_yaxis()
-        plot_path = os.path.join(self.results_folder, "shap_summary_bar_plot.png")
-        plt.savefig(plot_path, bbox_inches="tight", dpi=300)
-        plt.close()
-        logging.info(f"SHAP Summary Bar Plot saved to {plot_path}")
-
-    def _plot_shap_summary_bar(self, shap_values):
         """
         Generate a SHAP Summary Bar Plot showing the average absolute SHAP values for each feature.
 
@@ -235,6 +209,10 @@ class SHAPAnalysis(ExplainabilityBase):
         sorted_indices = np.argsort(mean_shap_values)[::-1]
         sorted_features = [feature_names[i] for i in sorted_indices]
         sorted_shap_values = mean_shap_values[sorted_indices]
+
+        logging.info("Ordered features and their mean SHAP values:")
+        for feature, value in zip(sorted_features, sorted_shap_values):
+            logging.info(f"{feature}: {value:.5f}")
 
         plt.figure(figsize=(12, 8))
         plt.barh(sorted_features, sorted_shap_values, color='skyblue')
