@@ -3,6 +3,7 @@ import argparse
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 from tqdm import tqdm
 import shap
 import logging
@@ -212,7 +213,7 @@ class SHAPAnalysis(ExplainabilityBase):
 
         # Define colors: dynamic features in one color, static features in another.
         dynamic_color = 'skyblue'
-        static_color = 'salmon'
+        static_color = 'blue'
         colors = [dynamic_color if i < num_dynamic else static_color for i in sorted_indices]
 
         # Plot the bar chart with individual bar colors
@@ -221,6 +222,11 @@ class SHAPAnalysis(ExplainabilityBase):
         plt.xlabel("Mean Absolute SHAP Value")
         plt.title("SHAP Summary Bar Plot")
         plt.gca().invert_yaxis()
+
+        dynamic_patch = mpatches.Patch(color=dynamic_color, label='Dynamic Features')
+        static_patch = mpatches.Patch(color=static_color, label='Static Features')
+        plt.legend(handles=[dynamic_patch, static_patch])
+        
         plot_path = os.path.join(self.results_folder, "shap_summary_bar_plot.png")
         plt.savefig(plot_path, bbox_inches="tight", dpi=300)
         plt.close()
