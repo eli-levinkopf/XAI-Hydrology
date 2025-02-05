@@ -6,6 +6,7 @@ from tqdm import tqdm
 import pandas as pd
 import yaml
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 from SALib.analyze import sobol, morris
 from adjustText import adjust_text
 from SALib.sample.sobol import sample
@@ -358,23 +359,35 @@ class SensitivityAnalysis:
         df.to_csv(output_file, index=False, float_format='%.2f')
         logging.info(f"Sensitivity analysis results saved to: {output_file}")
 
+        # Define a helper function to decide on the color.
+        # It assumes that self.dynamic_inputs and self.static_attributes exist and that
+        # feature names in df['Feature'] come from self.dynamic_inputs + self.static_attributes.
+        def get_feature_color(feature):
+            if feature in self.dynamic_inputs:
+                return 'skyblue'
+            else:
+                return 'blue'
+        
         if self.method == "morris":
+            # Sort the DataFrame by 'Mu*'
             df = df.sort_values(by='Mu*', ascending=False)
+            # Build a list of colors corresponding to each feature in the DataFrame.
+            colors = [get_feature_color(feat) for feat in df['Feature']]
 
             fig, axes = plt.subplots(2, 2, figsize=(12, 10), constrained_layout=True)
 
             # Mu* Plot
-            axes[0, 0].barh(df['Feature'], df['Mu*'], color='cornflowerblue', alpha=0.7)
+            axes[0, 0].barh(df['Feature'], df['Mu*'], color=colors, alpha=0.7)
             axes[0, 0].set_title("Mu* (Mean Absolute Effect)")
             axes[0, 0].invert_yaxis()
 
             # Mu Plot
-            axes[0, 1].barh(df['Feature'], df['Mu'], color='cornflowerblue', alpha=0.7)
+            axes[0, 1].barh(df['Feature'], df['Mu'], color=colors, alpha=0.7)
             axes[0, 1].set_title("Mu (Mean Effect)")
             axes[0, 1].invert_yaxis()
 
             # Sigma Plot 
-            axes[1, 0].barh(df['Feature'], df['Std Dev'], color='cornflowerblue', alpha=0.7)
+            axes[1, 0].barh(df['Feature'], df['Std Dev'], color=colors, alpha=0.7)
             axes[1, 0].set_title("Standard Deviation")
             axes[1, 0].invert_yaxis()
 
@@ -384,41 +397,72 @@ class SensitivityAnalysis:
                 ax.set_xlabel("Value")
                 ax.grid(True, linestyle='--', alpha=0.5)
             
-            morris_path = os.path.join(output_dir, f"sensitivity_analysis_morris_bar_epoch{self.epoch}_{self.analysis_type}.png")
+            # Create a common legend for dynamic vs. static features in the bottom right.
+            dynamic_patch = mpatches.Patch(color='skyblue', label='Dynamic Features')
+            static_patch = mpatches.Patch(color='blue', label='Static Features')
+            fig.legend(handles=[dynamic_patch, static_patch], loc='lower right')
+
+            morris_path = os.path.join(
+                output_dir,
+                f"sensitivity_analysis_morris_bar_epoch{self.epoch}_{self.analysis_type}.png"
+            )
             plt.savefig(morris_path, dpi=300, bbox_inches='tight')
             logging.info(f"Horizontal bar plots saved to: {morris_path}")
 
             # Scatter Plot
             plt.figure(figsize=(8, 6))
-            plt.scatter(df['Mu*'], df['Std Dev'], alpha=0.7, s=100)
-            texts = [plt.text(x, y, label, fontsize=9) for x, y, label in zip(df['Mu*'], df['Std Dev'], df['Feature'])]
+            scatter_colors = [get_feature_color(feat) for feat in df['Feature']]
+            plt.scatter(df['Mu*'], df['Std Dev'], alpha=0.7, s=100, c=scatter_colors)
+            texts = [
+                plt.text(x, y, label, fontsize=9)
+                for x, y, label in zip(df['Mu*'], df['Std Dev'], df['Feature'])
+            ]
             adjust_text(texts, arrowprops=dict(arrowstyle='-', color='grey', alpha=0.5))
             plt.xlabel('Mu* (Mean Absolute Effect)')
             plt.ylabel('Sigma (Std Dev)')
             plt.title("Morris Sensitivity Analysis")
             plt.grid(alpha=0.3)
+
+            plt.legend(handles=[dynamic_patch, static_patch], loc='lower right')
             plt.tight_layout()
-            scatter_path = os.path.join(output_dir, f"morris_sensitivity_scatter_epoch{self.epoch}_{self.analysis_type}.png")
+            scatter_path = os.path.join(
+                output_dir,
+                f"morris_sensitivity_scatter_epoch{self.epoch}_{self.analysis_type}.png"
+            )
             plt.savefig(scatter_path, dpi=300, bbox_inches='tight')
             logging.info(f"Scatter plot saved to: {scatter_path}")
+            plt.close('all')
+
         elif self.method == "sobol":
-            # Sobol Bar Plots
+            # For Sobol, assume that df['Feature'] follows the same ordering.
+            colors = [get_feature_color(feat) for feat in df['Feature']]
+
             fig, axes = plt.subplots(2, 1, figsize=(10, 10), sharex=True)
-            axes[0].bar(df['Feature'], df['S1'], color='blue', alpha=0.7)
+            # S1 Plot with color mapping
+            axes[0].bar(df['Feature'], df['S1'], color=colors, alpha=0.7)
             axes[0].set_ylabel("S1 (First-order Sensitivity Index)")
             axes[0].set_title("Sobol Sensitivity Analysis - S1")
 
-            axes[1].bar(df['Feature'], df['ST'], color='green', alpha=0.7)
+            # ST Plot with color mapping
+            axes[1].bar(df['Feature'], df['ST'], color=colors, alpha=0.7)
             axes[1].set_ylabel("ST (Total Sensitivity Index)")
             axes[1].set_xlabel("Features")
             axes[1].set_title("Sobol Sensitivity Analysis - ST")
 
             plt.xticks(rotation=45, ha='right')
             plt.tight_layout()
-            sobol_path = os.path.join(output_dir, f"sobol_sensitivity_analysis_epoch{self.epoch}_{self.analysis_type}.png")
+            # Add legend for the Sobol plot.
+            dynamic_patch = mpatches.Patch(color='skyblue', label='Dynamic Features')
+            static_patch = mpatches.Patch(color='blue', label='Static Features')
+            plt.legend(handles=[dynamic_patch, static_patch], loc='lower right')
+            
+            sobol_path = os.path.join(
+                output_dir,
+                f"sobol_sensitivity_analysis_epoch{self.epoch}_{self.analysis_type}.png"
+            )
             plt.savefig(sobol_path, dpi=300, bbox_inches='tight')
             logging.info(f"Sobol sensitivity analysis plot saved to: {sobol_path}")
-            plt.show()
+            plt.close('all')
 
     def run_sensitivity_analysis(self):
         results = self._collect_results()
