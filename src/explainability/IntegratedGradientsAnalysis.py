@@ -3,6 +3,7 @@ import argparse
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 from tqdm import tqdm
 import logging
 torch.backends.cudnn.enabled = False
@@ -139,15 +140,17 @@ class IntegratedGradientsAnalysis(ExplainabilityBase):
         ig_dyn_reshaped = ig_dyn.reshape(n_samples, self.seq_length, num_dynamic)
         return ig_dyn_reshaped.sum(axis=1)  # sum over seq_length
 
-    def _plot_ig_bar(self, ig_values, feature_names, title="Overall Feature Contributions", use_abs=True):
+    def _plot_ig_bar(self, ig_values, feature_names, title="Overall Feature Contributions", use_abs=True, dynamic_count=0):
         """
-        Plot a horizontal bar chart of average Integrated Gradients across samples.
+        Plot a horizontal bar chart of average Integrated Gradients (IG) across samples.
 
         Args:
             ig_values (np.ndarray): [n_samples, n_features]
-            feature_names (list of str): Feature names of length n_features
-            title (str): Title for the plot
+            feature_names (list of str): Feature names of length n_features.
+            title (str): Title for the plot.
             use_abs (bool): If True, plot mean absolute IG; else plot mean signed IG.
+            dynamic_count (int): Number of dynamic features (assumed to be the first features in the list).
+                                Dynamic features are colored 'skyblue' and static features 'blue'.
         """
         if use_abs:
             scores = np.mean(np.abs(ig_values), axis=0)
@@ -158,17 +161,25 @@ class IntegratedGradientsAnalysis(ExplainabilityBase):
             x_label = "Mean Signed IG"
             plot_suffix = "signed"
 
+        # Sort features by score (in descending order)
         sorted_idx = np.argsort(scores)[::-1]
         sorted_scores = scores[sorted_idx]
         sorted_feature_names = [feature_names[i] for i in sorted_idx]
 
+        # Assign colors based on dynamic vs. static
+        colors = ['skyblue' if i < dynamic_count else 'blue' for i in sorted_idx]
+
         plt.figure(figsize=(8, 6))
-        plt.barh(range(len(sorted_scores)), sorted_scores, color='skyblue')
+        plt.barh(range(len(sorted_scores)), sorted_scores, color=colors)
         plt.yticks(range(len(sorted_scores)), sorted_feature_names)
         plt.xlabel(x_label)
         plt.title(title)
         plt.tight_layout()
         plt.gca().invert_yaxis()
+
+        dynamic_patch = mpatches.Patch(color='skyblue', label='Dynamic Features')
+        static_patch = mpatches.Patch(color='blue', label='Static Features')
+        plt.legend(handles=[dynamic_patch, static_patch], loc='lower right')
 
         plot_path = os.path.join(self.results_folder, f"IG_summary_bar_plot_{plot_suffix}.png")
         plt.savefig(plot_path, bbox_inches="tight", dpi=300)
@@ -202,7 +213,8 @@ class IntegratedGradientsAnalysis(ExplainabilityBase):
             ig_values=combined_ig,
             feature_names=combined_feature_names,
             title="Overall Feature Contributions (IG) - absolute",
-            use_abs=True
+            use_abs=True,
+            dynamic_count=num_dyn_features
         )
 
         # Plot bar chart of mean signed IG
@@ -210,7 +222,8 @@ class IntegratedGradientsAnalysis(ExplainabilityBase):
             ig_values=combined_ig,
             feature_names=combined_feature_names,
             title="Overall Feature Contributions (IG) - signed",
-            use_abs=False
+            use_abs=False,
+            dynamic_count=num_dyn_features
         )
 
 def main():

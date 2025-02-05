@@ -225,7 +225,7 @@ class SHAPAnalysis(ExplainabilityBase):
 
         dynamic_patch = mpatches.Patch(color=dynamic_color, label='Dynamic Features')
         static_patch = mpatches.Patch(color=static_color, label='Static Features')
-        plt.legend(handles=[dynamic_patch, static_patch])
+        plt.legend(handles=[dynamic_patch, static_patch], loc='lower right')
         
         plot_path = os.path.join(self.results_folder, "shap_summary_bar_plot.png")
         plt.savefig(plot_path, bbox_inches="tight", dpi=300)
