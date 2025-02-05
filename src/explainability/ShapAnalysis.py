@@ -210,8 +210,14 @@ class SHAPAnalysis(ExplainabilityBase):
         sorted_features = [feature_names[i] for i in sorted_indices]
         sorted_shap_values = mean_shap_values[sorted_indices]
 
+        # Define colors: dynamic features in one color, static features in another.
+        dynamic_color = 'skyblue'
+        static_color = 'salmon'
+        colors = [dynamic_color if i < num_dynamic else static_color for i in sorted_indices]
+
+        # Plot the bar chart with individual bar colors
         plt.figure(figsize=(12, 8))
-        plt.barh(sorted_features, sorted_shap_values, color='skyblue')
+        plt.barh(sorted_features, sorted_shap_values, color=colors)
         plt.xlabel("Mean Absolute SHAP Value")
         plt.title("SHAP Summary Bar Plot")
         plt.gca().invert_yaxis()
