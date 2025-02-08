@@ -128,11 +128,13 @@ class ExplainabilityBase:
             x_d = torch.tensor(basin_data["x_d"], dtype=torch.float32)
             x_s = torch.tensor(basin_data["x_s"], dtype=torch.float32)
             
-            # Check if static features are a single copy
             if x_s.ndim == 1:
-                n_samples = x_d.shape[0]  # number of dynamic samples
-                # Duplicate x_s so its shape becomes (n_samples, n_static)
-                x_s = x_s.unsqueeze(0).repeat(n_samples, 1)
+                x_s = x_s.unsqueeze(0)  # Now x_s shape becomes (1, n_static_features)
+
+            # If x_s has only one row but x_d has more than one sample, duplicate x_s.
+            if x_s.shape[0] == 1 and x_d.shape[0] > 1:
+                n_samples = x_d.shape[0]
+                x_s = x_s.repeat(n_samples, 1)
             
             # Process the data (this function expects both to be 2D in the sample dimension)
             x_d, x_s = self._preprocess_basin_data(x_d, x_s)
@@ -162,11 +164,14 @@ class ExplainabilityBase:
 
             x_d = torch.tensor(basin_data["x_d"], dtype=torch.float32)
             x_s = torch.tensor(basin_data["x_s"], dtype=torch.float32)
-            
-            # Duplicate static features if necessary
+
             if x_s.ndim == 1:
+                x_s = x_s.unsqueeze(0)  # Now x_s shape becomes (1, n_static_features)
+
+            # If x_s has only one row but x_d has more than one sample, duplicate x_s.
+            if x_s.shape[0] == 1 and x_d.shape[0] > 1:
                 n_samples = x_d.shape[0]
-                x_s = x_s.unsqueeze(0).repeat(n_samples, 1)
+                x_s = x_s.repeat(n_samples, 1)
             
             # Preprocess the data (this removes any samples with NaNs, etc.)
             x_d, x_s = self._preprocess_basin_data(x_d, x_s)
