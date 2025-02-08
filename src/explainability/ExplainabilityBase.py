@@ -127,6 +127,14 @@ class ExplainabilityBase:
         for basin_id, basin_data in data.items():
             x_d = torch.tensor(basin_data["x_d"], dtype=torch.float32)
             x_s = torch.tensor(basin_data["x_s"], dtype=torch.float32)
+            
+            # Check if static features are a single copy
+            if x_s.ndim == 1:
+                n_samples = x_d.shape[0]  # number of dynamic samples
+                # Duplicate x_s so its shape becomes (n_samples, n_static)
+                x_s = x_s.unsqueeze(0).repeat(n_samples, 1)
+            
+            # Process the data (this function expects both to be 2D in the sample dimension)
             x_d, x_s = self._preprocess_basin_data(x_d, x_s)
             valid_count = x_d.shape[0]
             basin_sample_counts[basin_id] = valid_count
@@ -154,6 +162,13 @@ class ExplainabilityBase:
 
             x_d = torch.tensor(basin_data["x_d"], dtype=torch.float32)
             x_s = torch.tensor(basin_data["x_s"], dtype=torch.float32)
+            
+            # Duplicate static features if necessary
+            if x_s.ndim == 1:
+                n_samples = x_d.shape[0]
+                x_s = x_s.unsqueeze(0).repeat(n_samples, 1)
+            
+            # Preprocess the data (this removes any samples with NaNs, etc.)
             x_d, x_s = self._preprocess_basin_data(x_d, x_s)
 
             if len(x_d) > target:
