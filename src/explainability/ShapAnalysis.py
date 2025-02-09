@@ -190,8 +190,8 @@ class SHAPAnalysis(ExplainabilityBase):
         logging.info(f"SHAP values shape: {shap_values.shape}")
 
         # Save results for reuse
-        np.save(os.path.join(self.results_folder, "shap_values.npy"), shap_values)
-        np.savez(os.path.join(self.results_folder, "inputs.npz"), x_d=final_x_d, x_s=final_x_s)
+        # np.save(os.path.join(self.results_folder, "shap_values.npy"), shap_values)
+        # np.savez(os.path.join(self.results_folder, "inputs.npz"), x_d=final_x_d, x_s=final_x_s)
 
         # Clean up
         torch.cuda.empty_cache()
@@ -416,7 +416,7 @@ def main():
     else:
         shap_values, inputs = analysis.run_shap()
 
-    analysis.run_shap_visualizations(shap_values, inputs)
+    # analysis.run_shap_visualizations(shap_values, inputs)
 
 
 if __name__ == "__main__":
