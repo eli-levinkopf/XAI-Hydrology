@@ -17,7 +17,7 @@ BATCH_SIZE = 256
 
 
 class SHAPAnalysis(ExplainabilityBase):
-    def __init__(self, run_dir, epoch, num_samples):
+    def __init__(self, run_dir, epoch, num_samples, use_embedding=False):
         """
         Initialize SHAPAnalysis for a trained NeuralHydrology model.
         
@@ -25,12 +25,112 @@ class SHAPAnalysis(ExplainabilityBase):
             run_dir (str): Path to the run directory.
             epoch (int): Epoch number to load the model.
             num_samples (int): Number of samples for SHAP analysis.
+            use_embedding (bool): If True, run SHAP on the embedding output.
         """
         super().__init__(run_dir, epoch, num_samples, analysis_name="shap")
+        self.use_embedding = use_embedding
+
+    def _get_embedding_outputs(self, final_x_d, final_x_s):
+        """
+        Run a forward pass with a hook on the InputLayer to extract the 
+        embedding outputs for each sample.
+        
+        We attach the hook to the entire InputLayer (from inputlayer.py).  
+        Adjust this if you need a different module.
+        
+        Returns:
+            np.ndarray: Array of shape [N, embedding_dim] (for example, [N, 32])
+        """
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # Recombine inputs as in the run_shap method:
+        combined_inputs = np.hstack([
+            final_x_d.reshape(len(final_x_d), -1),
+            final_x_s
+        ])
+        combined_inputs_tensor = torch.tensor(combined_inputs, dtype=torch.float32).to(device)
+        # Split combined_inputs_tensor into x_d and x_s (as done in _wrap_model)
+        num_dynamic = len(self.dynamic_features)
+        seq_length = self.seq_length
+        x_d_flat = combined_inputs_tensor[:, : seq_length * num_dynamic]
+        x_s = combined_inputs_tensor[:, seq_length * num_dynamic:]
+        x_d = x_d_flat.view(-1, seq_length, num_dynamic)
+        inputs = {"x_d": x_d, "x_s": x_s}
+
+        embedding_outputs = []
+
+        def hook_fn(module, input, output):
+            logging.info(f"Embedding hook triggered: output shape = {output.shape}")
+            embedding_outputs.append(output.detach())
+            return output
+
+        # Here we attach the hook to the entire InputLayer.
+        hook_handle = self.model.input_layer.register_forward_hook(hook_fn)
+        _ = self.model(inputs)  # Run one forward pass so the hook is called.
+        hook_handle.remove()
+
+        # Depending on the configuration, the output may be multi-dimensional.
+        # For example, if InputLayer returns a concatenated tensor of shape [seq_length, batch, emb_dim],
+        # we might want to select a specific time-step or aggregate over time.
+        # For this example, we assume that the embedding output is what we wish to explain.
+        emb_out = embedding_outputs[0].cpu().numpy()
+        # (Optionally, flatten or select a specific time step here.)
+
+        logging.info(f"Captured embedding output shape: {emb_out.shape}")
+        logging.debug(f"Sample embedding values (first 2 samples): {emb_out[:2]}")
+
+        return emb_out
+
+    def _wrap_model_embedding(self):
+        """
+        Create a wrapped model that accepts the embedding output as input and maps 
+        it to the final prediction. We override the InputLayer’s output using a hook.
+        
+        Returns:
+            torch.nn.Module: Wrapped model that takes an input of shape [batch, embedding_dim].
+        """
+        class WrappedModelEmbedding(torch.nn.Module):
+            def __init__(self, original_model, seq_length, num_dynamic, num_static):
+                super().__init__()
+                self.original_model = original_model
+                self.seq_length = seq_length
+                self.num_dynamic = num_dynamic
+                self.num_static = num_static
+
+            def forward(self, embedding_input):
+                """
+                Args:
+                    embedding_input (torch.Tensor): Tensor of shape [batch, embedding_dim]
+                Returns:
+                    torch.Tensor: Final prediction of shape [batch, 1]
+                """
+                # Define a hook that overrides the InputLayer’s output
+                def hook_fn(module, input, output):
+                    return embedding_input
+                # Attach the hook to the InputLayer.
+                hook_handle = self.original_model.input_layer.register_forward_hook(hook_fn)
+                batch_size = embedding_input.size(0)
+                # Create dummy inputs for the remaining inputs; their values will be ignored due to the hook.
+                dummy_x_d = torch.zeros(batch_size, self.seq_length, self.num_dynamic, device=embedding_input.device)
+                dummy_x_s = torch.zeros(batch_size, self.num_static, device=embedding_input.device)
+                inputs = {"x_d": dummy_x_d, "x_s": dummy_x_s}
+                out_dict = self.original_model(inputs)
+                hook_handle.remove()
+                # Here we assume the output dictionary has key "y_hat" and we take the last time-step prediction.
+                return out_dict["y_hat"][:, -1, 0].unsqueeze(1)
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        return WrappedModelEmbedding(
+            self.model, 
+            seq_length=self.seq_length,
+            num_dynamic=len(self.dynamic_features),
+            num_static=len(self.static_features)
+        ).to(device).eval()
 
     def run_shap(self):
         """
         Main method to compute and save SHAP values for the model.
+        Depending on self.use_embedding, SHAP is run either on the original combined inputs
+        or on the embedding outputs.
         
         Returns:
             shap_values (np.ndarray): The computed SHAP values.
@@ -39,17 +139,26 @@ class SHAPAnalysis(ExplainabilityBase):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(device)
 
+        logging.info("Model's modules:")
+        for name, module in self.model.named_modules():
+            logging.info(f"Module: {name} --> {module}")
+
         # Sample dynamic and static inputs
         final_x_d, final_x_s = self._random_sample_from_file()
 
-        # Combine x_d and x_s into a single tensor for SHAP
-        combined_inputs = np.hstack([
-            final_x_d.reshape(len(final_x_d), -1),
-            final_x_s
-        ])
-        combined_inputs_tensor = torch.tensor(combined_inputs, dtype=torch.float32).to(device)
-
-        wrapped_model = self._wrap_model()
+        if self.use_embedding:
+            # Get the embedding outputs from the InputLayer
+            shap_inputs_array = self._get_embedding_outputs(final_x_d, final_x_s)
+            combined_inputs_tensor = torch.tensor(shap_inputs_array, dtype=torch.float32).to(device)
+            wrapped_model = self._wrap_model_embedding()
+        else:
+            # Combine x_d and x_s into a single tensor for SHAP
+            combined_inputs = np.hstack([
+                final_x_d.reshape(len(final_x_d), -1),
+                final_x_s
+            ])
+            combined_inputs_tensor = torch.tensor(combined_inputs, dtype=torch.float32).to(device)
+            wrapped_model = self._wrap_model()
 
         # Create background (reference) data
         background_indices = np.random.choice(
@@ -288,9 +397,11 @@ def main():
                         help='Number of samples to use for SHAP analysis.')
     parser.add_argument('--reuse_shap', action='store_true',
                         help='If set, reuse shap_values.npy and inputs.npz if they exist, skipping new computation.')
+    parser.add_argument('--use_embedding', action='store_true',
+                        help='If set, run SHAP on the embedding outputs (32 neurons) rather than on the original inputs.')
 
     args = parser.parse_args()
-    analysis = SHAPAnalysis(args.run_dir, args.epoch, args.num_samples)
+    analysis = SHAPAnalysis(args.run_dir, args.epoch, args.num_samples, use_embedding=args.use_embedding)
 
     shap_values_path = os.path.join(analysis.results_folder, "shap_values.npy")
     inputs_path = os.path.join(analysis.results_folder, "inputs.npz")
