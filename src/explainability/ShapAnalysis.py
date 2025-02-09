@@ -64,7 +64,7 @@ class SHAPAnalysis(ExplainabilityBase):
             return output
 
         # Here we attach the hook to the entire InputLayer.
-        hook_handle = self.model.input_layer.register_forward_hook(hook_fn)
+        hook_handle = self.model.embedding_net.register_forward_hook(hook_fn)
         _ = self.model(inputs)  # Run one forward pass so the hook is called.
         hook_handle.remove()
 
@@ -106,7 +106,7 @@ class SHAPAnalysis(ExplainabilityBase):
                 def hook_fn(module, input, output):
                     return embedding_input
                 # Attach the hook to the InputLayer.
-                hook_handle = self.original_model.input_layer.register_forward_hook(hook_fn)
+                hook_handle = self.original_model.embedding_net.register_forward_hook(hook_fn)
                 batch_size = embedding_input.size(0)
                 # Create dummy inputs for the remaining inputs; their values will be ignored due to the hook.
                 dummy_x_d = torch.zeros(batch_size, self.seq_length, self.num_dynamic, device=embedding_input.device)
