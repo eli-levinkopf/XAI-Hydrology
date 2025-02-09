@@ -74,7 +74,6 @@ class SHAPAnalysis(ExplainabilityBase):
         # For this example, we assume that the embedding output is what we wish to explain.
         emb_out = embedding_outputs[0].cpu().numpy()
         # (Optionally, flatten or select a specific time step here.)
-
         logging.info(f"Captured embedding output shape: {emb_out.shape}")
         logging.debug(f"Sample embedding values (first 2 samples): {emb_out[:2]}")
 
@@ -188,6 +187,7 @@ class SHAPAnalysis(ExplainabilityBase):
                     torch.cuda.empty_cache()
 
         shap_values = np.concatenate(shap_values_batches, axis=0)
+        logging.info(f"SHAP values shape: {shap_values.shape}")
 
         # Save results for reuse
         np.save(os.path.join(self.results_folder, "shap_values.npy"), shap_values)
