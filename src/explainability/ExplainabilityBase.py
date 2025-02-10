@@ -27,9 +27,12 @@ class ExplainabilityBase:
         self.analysis_name = analysis_name
 
         self.cfg = self._load_config()
+        self.seq_length = self.cfg["seq_length"]
         self.dynamic_features = self.cfg["dynamic_inputs"]
         self.static_features = self.cfg["static_attributes"]
-        self.seq_length = self.cfg["seq_length"]
+        self.dynamic_emb_dim = self.cfg["dynamics_embedding"]["hiddens"][-1]
+        self.static_emb_dim = self.cfg["statics_embedding"]["hiddens"][-1]
+        self.total_emb_dim = self.dynamic_emb_dim + self.static_emb_dim  # e.g., 64 if both are 32
 
         self.model = self._load_model()
         self.results_folder = self._setup_results_folder()
