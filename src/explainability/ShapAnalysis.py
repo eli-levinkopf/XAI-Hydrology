@@ -1,3 +1,4 @@
+from typing import Dict, Tuple, Optional, Union
 import os
 import argparse
 import torch
@@ -7,6 +8,9 @@ import matplotlib.patches as mpatches
 from tqdm import tqdm
 import shap
 import logging
+from torch import Tensor, nn
+from pathlib import Path
+
 torch.backends.cudnn.enabled = False
 
 from ExplainabilityBase import ExplainabilityBase 
@@ -16,32 +20,36 @@ BATCH_SIZE = 256
 
 
 class SHAPAnalysis(ExplainabilityBase):
-    def __init__(self, run_dir, epoch, num_samples, use_embedding=False):
+    def __init__(self, run_dir: Union[str, Path], epoch: int, num_samples: int, use_embedding: bool = False) -> None:
         """
         Initialize SHAPAnalysis for a trained NeuralHydrology model.
         
         Args:
-            run_dir (str): Path to the run directory.
-            epoch (int): Epoch number to load the model.
-            num_samples (int): Number of samples for SHAP analysis.
-            use_embedding (bool): If True, run SHAP on the embedding outputs.
+            run_dir: Path to the run directory.
+            epoch: Epoch number to load the model.
+            num_samples: Number of samples for SHAP analysis.
+            use_embedding: If True, run SHAP on the embedding outputs.
         """
         super().__init__(run_dir, epoch, num_samples, analysis_name="shap")
         self.use_embedding = use_embedding
 
-    def _get_embedding_outputs(self, final_x_d, final_x_s):
+    def _get_embedding_outputs(self, final_x_d: np.ndarray, final_x_s: np.ndarray) -> np.ndarray:
         """
-        Run a forward pass with a hook on the embedding network (embedding_net) to extract 
+        Run a forward pass with a hook on the embedding network (embedding_net) in batches to extract 
         the embedding outputs for each sample. Then, process the raw output to obtain a 
         flattened representation.
 
-        Expected raw output from embedding_net: [seq_length, batch, dynamic_emb_dim + static_emb_dim],
+        Expected raw output from embedding_net: [seq_length, num_samples, dynamic_emb_dim + static_emb_dim],
         where:
           - the first dynamic_emb_dim features come from the dynamic embedding (one per time step)
           - the next static_emb_dim features come from the static embedding (repeated over time)
 
         We convert this into a flattened representation of shape:
-          [batch, (seq_length * dynamic_emb_dim) + static_emb_dim]
+          [num_samples, (seq_length * dynamic_emb_dim) + static_emb_dim]
+
+       Args:
+            final_x_d: Dynamic input features
+            final_x_s: Static input features
         
         Returns:
             np.ndarray: Final flattened embedding representation.
@@ -53,56 +61,70 @@ class SHAPAnalysis(ExplainabilityBase):
             final_x_s
         ])
         combined_inputs_tensor = torch.tensor(combined_inputs, dtype=torch.float32).to(device)
-        num_dynamic = len(self.dynamic_features)  # original count; not used in embedding branch
+        
+        num_dynamic = len(self.dynamic_features)
         seq_length = self.seq_length
         x_d_flat = combined_inputs_tensor[:, : seq_length * num_dynamic]
         x_s = combined_inputs_tensor[:, seq_length * num_dynamic:]
         x_d = x_d_flat.view(-1, seq_length, num_dynamic)
-        inputs = {"x_d": x_d, "x_s": x_s}
 
-        embedding_outputs = []
+        # Prepare to collect embedding outputs from each batch
+        embedding_outputs_list = []
 
-        def hook_fn(module, input, output):
-            logging.info(f"Embedding hook triggered: output shape = {output.shape}")
-            embedding_outputs.append(output.detach())
+        def hook_fn(module: nn.Module, input: Tuple[Tensor], output: Tensor) -> Tensor:
+            # Append the output from this batch
+            embedding_outputs_list.append(output.detach())
             return output
 
-        # Attach hook to the correct module: embedding_net
+        # Attach hook to the embedding_net
         hook_handle = self.model.embedding_net.register_forward_hook(hook_fn)
-        _ = self.model(inputs)  # Run one forward pass so the hook is called.
+
+        # Process the inputs in batches to avoid a huge allocation
+        num_samples = x_d.shape[0]
+        for i in range(0, num_samples, BATCH_SIZE):
+            batch_x_d = x_d[i: i + BATCH_SIZE]
+            batch_x_s = x_s[i: i + BATCH_SIZE]
+            inputs = {"x_d": batch_x_d, "x_s": batch_x_s}
+            with torch.no_grad():
+                _ = self.model(inputs)
+            # Optionally clear the cache after each batch:
+            torch.cuda.empty_cache()
+
         hook_handle.remove()
 
-        # Retrieve the embedding dimensions from the model configuration:
-        dyn_emb_dim = self.model.embedding_net.dynamics_output_size
-        stat_emb_dim = self.model.embedding_net.statics_output_size
+        # Each element in embedding_outputs_list is of shape: [seq_length, batch, emb_dim]
+        # Concatenate along the batch dimension (dim=1)
+        combined_embedding = torch.cat(embedding_outputs_list, dim=1)
 
-        # At this point, embedding_outputs[0] is expected to have shape [seq_length, batch, dyn_emb_dim + stat_emb_dim].
-        emb_out = embedding_outputs[0].cpu()  # Tensor of shape [seq_length, batch, (dyn_emb_dim + stat_emb_dim)]
+        # Process the combined embeddings
+        emb_out = combined_embedding.cpu()
         logging.info(f"Captured raw embedding output shape: {emb_out.shape}")
 
-        # Permute to get [batch, seq_length, (dyn_emb_dim + stat_emb_dim)]
+        # Permute to shape [num_samples, seq_length, emb_dim]
         emb_out = emb_out.permute(1, 0, 2)
         logging.info(f"After permuting, embedding shape: {emb_out.shape}")
 
+        # Retrieve embedding dimensions from the model configuration
+        dyn_emb_dim = self.model.embedding_net.dynamics_output_size
+        stat_emb_dim = self.model.embedding_net.statics_output_size
+
         # Split dynamic and static parts:
-        #   dynamic -> first dyn_emb_dim features
-        #   static  -> last stat_emb_dim features
-        dynamic_emb = emb_out[:, :, :dyn_emb_dim]    # shape: [batch, seq_length, dyn_emb_dim]
-        static_emb = emb_out[:, 0, dyn_emb_dim:]     # shape: [batch, stat_emb_dim]
+        dynamic_emb = emb_out[:, :, :dyn_emb_dim]    # shape: [num_samples, seq_length, dyn_emb_dim]
+        static_emb = emb_out[:, 0, dyn_emb_dim:]     # shape: [num_samples, stat_emb_dim]
         logging.info(f"Dynamic part shape: {dynamic_emb.shape}, Static part shape: {static_emb.shape}")
 
-        # Flatten the dynamic part over time: [batch, seq_length * dyn_emb_dim]
+        # Flatten the dynamic part over time: [num_samples, seq_length * dyn_emb_dim]
         dynamic_flat = dynamic_emb.reshape(dynamic_emb.shape[0], -1)
         logging.info(f"Flattened dynamic part shape: {dynamic_flat.shape}")
 
-        # Concatenate dynamic_flat with static_emb → final shape: [batch, (seq_length * dyn_emb_dim) + stat_emb_dim]
+        # Concatenate to get final embedding representation: [num_samples, (seq_length * dyn_emb_dim) + stat_emb_dim]
         final_emb = torch.cat([dynamic_flat, static_emb], dim=1)
         logging.info(f"Final embedding representation shape: {final_emb.shape}")
         logging.debug(f"Sample final embedding values (first 2 samples): {final_emb[:2].numpy()}")
     
         return final_emb.numpy()
 
-    def _wrap_model_embedding(self):
+    def _wrap_model_embedding(self)-> nn.Module:
         """
         Create a wrapped model that accepts the flattened embedding output as input and maps 
         it to the final prediction. We override the embedding network's output using a hook.
@@ -118,7 +140,7 @@ class SHAPAnalysis(ExplainabilityBase):
             torch.nn.Module: Wrapped model that takes an input of shape [batch, flattened_dim].
         """
         class WrappedModelEmbedding(torch.nn.Module):
-            def __init__(self, original_model, seq_length, num_dynamic, num_static):
+            def __init__(self, original_model: nn.Module, seq_length: int, num_dynamic: int, num_static: int) -> None:
                 super().__init__()
                 self.original_model = original_model
                 self.seq_length = seq_length
@@ -127,7 +149,7 @@ class SHAPAnalysis(ExplainabilityBase):
                 self.dyn_emb_dim = self.original_model.embedding_net.dynamics_output_size
                 self.stat_emb_dim = self.original_model.embedding_net.statics_output_size
 
-            def forward(self, embedding_input):
+            def forward(self, embedding_input: Tensor) -> Tensor:
                 """
                 Args:
                     embedding_input (torch.Tensor): Tensor of shape [batch, flattened_dim],
@@ -153,7 +175,7 @@ class SHAPAnalysis(ExplainabilityBase):
                 embedding_reconstructed = embedding_reconstructed.permute(1, 0, 2)
 
                 # Define a hook that overrides the embedding_net output with the reconstructed embedding
-                def hook_fn(module, input, output):
+                def hook_fn(module: nn.Module, input: Tuple[Tensor], output: Tensor) -> Tensor:
                     return embedding_reconstructed
                 
                 # Attach the hook
@@ -177,7 +199,7 @@ class SHAPAnalysis(ExplainabilityBase):
             num_static=len(self.static_features)
         ).to(device).eval()
 
-    def run_shap(self):
+    def run_shap(self) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
         """
         Main method to compute and save SHAP values for the model.
         Depending on self.use_embedding, SHAP is run either on the original combined inputs
@@ -241,15 +263,15 @@ class SHAPAnalysis(ExplainabilityBase):
         logging.info(f"SHAP values shape: {shap_values.shape}")
 
         # Save results for reuse (naming files differently if embedding is used)
-        # np.save(os.path.join(self.results_folder, f"{'shap_values_embedding' if self.use_embedding else 'shap_values'}.npy"), shap_values)
-        # np.savez(os.path.join(self.results_folder, f"{'inputs_embedding' if self.use_embedding else 'inputs'}.npz"), x_d=final_x_d, x_s=final_x_s)
+        np.save(os.path.join(self.results_folder, f"{'shap_values_embedding' if self.use_embedding else 'shap_values'}.npy"), shap_values)
+        np.savez(os.path.join(self.results_folder, f"{'inputs_embedding' if self.use_embedding else 'inputs'}.npz"), x_d=final_x_d, x_s=final_x_s)
 
         # Clean up
         torch.cuda.empty_cache()
 
         return shap_values, {"x_d": final_x_d, "x_s": final_x_s}
 
-    def _plot_shap_summary(self, shap_values, inputs):
+    def _plot_shap_summary(self, shap_values: np.ndarray, inputs: Dict[str, np.ndarray]) -> None:
         """
         Generate and save a SHAP summary plot, separating dynamic and static feature contributions.
 
@@ -305,94 +327,128 @@ class SHAPAnalysis(ExplainabilityBase):
         plt.close()
         logging.info(f"Summary plot saved to {summary_plot_path}")
 
-    def _plot_shap_contributions_over_time(self, shap_values, last_n_days=None):
+    def _plot_shap_contributions_over_time(self, shap_values: np.ndarray, last_n_days: Optional[int] = None) -> None:
         """
         Generate a plot showing the overall contribution of each dynamic feature to the prediction over time.
-
+        If use_embedding is True, the dynamic features correspond to the dynamic embedding dimensions.
+        
         Args:
-            shap_values (np.ndarray): SHAP values array of shape [n_samples, seq_length * num_dynamic + num_static].
+            shap_values (np.ndarray): SHAP values array.
             last_n_days (int, optional): Number of last days to display in the plot. Defaults to seq_length.
         """
         if last_n_days is None:
             last_n_days = self.seq_length
 
-        n_dynamic = len(self.dynamic_features)
-        dynamic_shap_values = shap_values[:, :self.seq_length * n_dynamic].reshape(-1, self.seq_length, n_dynamic)
-        median_shap_values = np.median(np.abs(dynamic_shap_values), axis=0)  # [seq_length, n_dynamic]
+        if self.use_embedding:
+            # In embedding mode, the dynamic part is given by the dynamic embedding output.
+            dyn_emb_dim = self.model.embedding_net.dynamics_output_size
+            dynamic_shap_values = shap_values[:, :self.seq_length * dyn_emb_dim].reshape(-1, self.seq_length, dyn_emb_dim)
+            median_shap_values = np.median(np.abs(dynamic_shap_values), axis=0)  # [seq_length, dyn_emb_dim]
+            feature_names = [f"Embed {i+1}" for i in range(dyn_emb_dim)]
+        else:
+            # Use original dynamic features.
+            n_dynamic = len(self.dynamic_features)
+            dynamic_shap_values = shap_values[:, :self.seq_length * n_dynamic].reshape(-1, self.seq_length, n_dynamic)
+            median_shap_values = np.median(np.abs(dynamic_shap_values), axis=0)  # [seq_length, n_dynamic]
+            feature_names = self.dynamic_features
+
 
         # Slice the last last_n_days
         days_to_plot = min(last_n_days, self.seq_length)
         median_shap_values = median_shap_values[-days_to_plot:]  # Take the last days_to_plot days
-        time_steps = np.arange(-days_to_plot, 0)  # Adjust x-axis accordingly
+        time_steps = np.arange(-days_to_plot, 0)
 
-        plt.figure(figsize=(15, 8))
-        for feature_idx, feature_name in enumerate(self.dynamic_features):
-            plt.plot(
-                time_steps,
-                median_shap_values[:, feature_idx],
-                label=f"{feature_name}"
-            )
+        plt.figure(figsize=(12, 10))
+        for feature_idx, feature_name in enumerate(feature_names):
+            plt.plot(time_steps, median_shap_values[:, feature_idx], label=feature_name)
 
-        plt.xticks(np.arange(-days_to_plot, 1, max(10, days_to_plot // 7)))  # Dynamically adjust tick spacing
-        plt.title(f"Overall Contribution of Dynamic Features to Prediction Over Time")
+
+        plt.xticks(np.arange(-days_to_plot, 1, max(10, days_to_plot // 7)))
+        plt.title("Overall Contribution of {} Features to Prediction Over Time".format(
+            "Embedding Dynamic" if self.use_embedding else "Dynamic"))
         plt.xlabel("Time Step")
         plt.ylabel("Mean Absolute SHAP Value")
         plt.legend(loc="upper left", fontsize=10, frameon=True)
         plt.grid(True)
 
-        plot_path = os.path.join(self.results_folder, "shap_overall_contribution_combined.png")
+        plot_path = os.path.join(self.results_folder, "shap_overall_contribution_combined{}".format(
+            "_Embedding.png" if self.use_embedding else ".png"))
         plt.savefig(plot_path, bbox_inches="tight", dpi=300)
         plt.close()
         logging.info(f"Saved overall contribution plot to {plot_path}")
 
-    def _plot_shap_summary_bar(self, shap_values):
+    def _plot_shap_summary_bar(self, shap_values: np.ndarray) -> None:
         """
         Generate a SHAP Summary Bar Plot showing the average absolute SHAP values for each feature.
-
+        Supports both original inputs and embedding outputs.
+        
         Args:
-            shap_values (np.ndarray): SHAP values array of shape [n_samples, seq_length * num_dynamic + num_static].
+            shap_values (np.ndarray): SHAP values array.
         """
-        num_dynamic = len(self.dynamic_features)
-        dynamic_shap_values = shap_values[:, :self.seq_length * num_dynamic].reshape(-1, self.seq_length, num_dynamic)
-        static_shap_values = shap_values[:, self.seq_length * num_dynamic:]
+        if self.use_embedding:
+            # In embedding mode, the flattened input dimensions are:
+            # [seq_length * dyn_emb_dim, stat_emb_dim]
+            dyn_emb_dim = self.model.embedding_net.dynamics_output_size
+            stat_emb_dim = self.model.embedding_net.statics_output_size
 
-        # Sum SHAP values across time steps and then average across samples for dynamic features
-        dynamic_summed_shap = np.sum(np.abs(dynamic_shap_values), axis=1) # Shape: [n_samples, num_dynamic]
-        dynamic_mean_shap = np.mean(dynamic_summed_shap, axis=0) # Shape: [num_dynamic]
+            dynamic_shap_values = shap_values[:, :self.seq_length * dyn_emb_dim].reshape(-1, self.seq_length, dyn_emb_dim)
+            static_shap_values = shap_values[:, self.seq_length * dyn_emb_dim:]
 
-        combined_static_shap, agg_static_names = self._aggregate_static_features(static_shap_values)
-        static_mean_shap = np.mean(np.abs(combined_static_shap), axis=0).squeeze()
+            # Sum dynamic contributions over time and average over samples
+            dynamic_summed_shap = np.sum(np.abs(dynamic_shap_values), axis=1)  # [n_samples, dyn_emb_dim]
+            dynamic_mean_shap = np.mean(dynamic_summed_shap, axis=0)  # [dyn_emb_dim]
+            static_mean_shap = np.mean(np.abs(static_shap_values), axis=0).squeeze()  # [stat_emb_dim]
 
-        feature_names = self.dynamic_features + agg_static_names
-        mean_shap_values = np.concatenate([dynamic_mean_shap, static_mean_shap])
+            feature_names = [f"Embed Dyn {i+1}" for i in range(dyn_emb_dim)] + \
+                            [f"Embed Stat {i+1}" for i in range(stat_emb_dim)]
+            mean_shap_values = np.concatenate([dynamic_mean_shap, static_mean_shap])
 
-        # Sort and plot
+            dynamic_color = 'skyblue'
+            static_color = 'blue'
+            colors = [dynamic_color] * dyn_emb_dim + [static_color] * stat_emb_dim
+        else:
+            num_dynamic = len(self.dynamic_features)
+            dynamic_shap_values = shap_values[:, :self.seq_length * num_dynamic].reshape(-1, self.seq_length, num_dynamic)
+            static_shap_values = shap_values[:, self.seq_length * num_dynamic:]
+
+            # Sum dynamic contributions across time and average over samples
+            dynamic_summed_shap = np.sum(np.abs(dynamic_shap_values), axis=1)  # [n_samples, num_dynamic]
+            dynamic_mean_shap = np.mean(dynamic_summed_shap, axis=0)  # [num_dynamic]
+
+            combined_static_shap, agg_static_names = self._aggregate_static_features(static_shap_values)
+            static_mean_shap = np.mean(np.abs(combined_static_shap), axis=0).squeeze()
+
+            feature_names = self.dynamic_features + agg_static_names
+            mean_shap_values = np.concatenate([dynamic_mean_shap, static_mean_shap])
+
+            # Colors for original features.
+            dynamic_color = 'skyblue'
+            static_color = 'blue'
+            colors = [dynamic_color] * len(self.dynamic_features) + [static_color] * len(agg_static_names)
+
+        # Sort features by mean absolute SHAP value
         sorted_indices = np.argsort(mean_shap_values)[::-1]
         sorted_features = [feature_names[i] for i in sorted_indices]
         sorted_shap_values = mean_shap_values[sorted_indices]
+        sorted_colors = [colors[i] for i in sorted_indices]
 
-        # Define colors: dynamic features in one color, static features in another.
-        dynamic_color = 'skyblue'
-        static_color = 'blue'
-        colors = [dynamic_color if i < num_dynamic else static_color for i in sorted_indices]
-
-        # Plot the bar chart with individual bar colors
-        plt.figure(figsize=(12, 8))
-        plt.barh(sorted_features, sorted_shap_values, color=colors)
+        plt.figure(figsize=(10, 12))
+        plt.barh(sorted_features, sorted_shap_values, color=sorted_colors)
         plt.xlabel("Mean Absolute SHAP Value")
         plt.title("SHAP Summary Bar Plot")
         plt.gca().invert_yaxis()
 
-        dynamic_patch = mpatches.Patch(color=dynamic_color, label='Dynamic Features')
-        static_patch = mpatches.Patch(color=static_color, label='Static Features')
+        dynamic_patch = mpatches.Patch(color=dynamic_color, label='Embedding Dynamic' if self.use_embedding else 'Dynamic')
+        static_patch = mpatches.Patch(color=static_color, label='Embedding Static' if self.use_embedding else 'Static')
         plt.legend(handles=[dynamic_patch, static_patch], loc='lower right')
-        
-        plot_path = os.path.join(self.results_folder, "shap_summary_bar_plot.png")
+
+        plot_path = os.path.join(self.results_folder, "shap_summary_bar_plot{}".format(
+            "_Embedding.png" if self.use_embedding else ".png"))
         plt.savefig(plot_path, bbox_inches="tight", dpi=300)
         plt.close()
         logging.info(f"SHAP Summary Bar Plot saved to {plot_path}")
 
-    def _plot_shap_summary_bar1(self, shap_values):
+    def _plot_shap_summary_bar1(self, shap_values: np.ndarray) -> None:
         """
         Generate a SHAP Summary Bar Plot showing the average absolute SHAP values for each feature - using shap.plots.bar.
         Args:
@@ -431,11 +487,11 @@ class SHAPAnalysis(ExplainabilityBase):
         plt.close()
         logging.info(f"SHAP Summary Bar Plot saved to {plot_path}")
 
-    def run_shap_visualizations(self, shap_values, inputs):
-        self._plot_shap_summary(shap_values, inputs)
+    def run_shap_visualizations(self, shap_values: np.ndarray, inputs: Dict[str, np.ndarray]) -> None:
+        if not self.use_embedding:
+            self._plot_shap_summary(shap_values, inputs)
         self._plot_shap_contributions_over_time(shap_values)
         self._plot_shap_summary_bar(shap_values)
-        # self._plot_shap_individual_samples(shap_values)
 
 
 def main():
@@ -463,7 +519,7 @@ def main():
     else:
         shap_values, inputs = analysis.run_shap()
 
-    # analysis.run_shap_visualizations(shap_values, inputs)
+    analysis.run_shap_visualizations(shap_values, inputs)
 
 
 if __name__ == "__main__":
