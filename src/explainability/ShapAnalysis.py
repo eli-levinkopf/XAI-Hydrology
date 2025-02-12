@@ -345,6 +345,9 @@ class SHAPAnalysis(ExplainabilityBase):
             dynamic_shap_values = shap_values[:, :self.seq_length * dyn_emb_dim].reshape(-1, self.seq_length, dyn_emb_dim)
             median_shap_values = np.median(np.abs(dynamic_shap_values), axis=0)  # [seq_length, dyn_emb_dim]
             feature_names = [f"Embed {i+1}" for i in range(dyn_emb_dim)]
+            # Create a colormap with a unique color for each embedding dimension.
+            cmap = plt.get_cmap("viridis", dyn_emb_dim)
+            colors = [cmap(i) for i in range(dyn_emb_dim)]
         else:
             # Use original dynamic features.
             n_dynamic = len(self.dynamic_features)
@@ -352,16 +355,18 @@ class SHAPAnalysis(ExplainabilityBase):
             median_shap_values = np.median(np.abs(dynamic_shap_values), axis=0)  # [seq_length, n_dynamic]
             feature_names = self.dynamic_features
 
-
-        # Slice the last last_n_days
+        # Slice to get only the last 'last_n_days'
         days_to_plot = min(last_n_days, self.seq_length)
         median_shap_values = median_shap_values[-days_to_plot:]  # Take the last days_to_plot days
         time_steps = np.arange(-days_to_plot, 0)
 
         plt.figure(figsize=(12, 10))
         for feature_idx, feature_name in enumerate(feature_names):
-            plt.plot(time_steps, median_shap_values[:, feature_idx], label=feature_name)
-
+            # If colors have been defined (in embedding mode), use them for each line
+            if self.use_embedding:
+                plt.plot(time_steps, median_shap_values[:, feature_idx], label=feature_name, color=colors[feature_idx])
+            else:
+                plt.plot(time_steps, median_shap_values[:, feature_idx], label=feature_name)
 
         plt.xticks(np.arange(-days_to_plot, 1, max(10, days_to_plot // 7)))
         plt.title("Overall Contribution of {} Features to Prediction Over Time".format(
