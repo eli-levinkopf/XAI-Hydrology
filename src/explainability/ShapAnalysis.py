@@ -359,15 +359,20 @@ class SHAPAnalysis(ExplainabilityBase):
         median_shap_values = median_shap_values[-days_to_plot:]  # Take the last days_to_plot days
         time_steps = np.arange(-days_to_plot, 0)
 
-        cmap = cm.get_cmap("tab20", 20)
-        colors = [cmap(i) for i in range(20)]
-        line_styles = cycle(["-", "--"])
+        custom_colors = [
+            "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", 
+            "#ffbb78", "#8c564b", "#98df8a", "#7f7f7f", 
+            "#bcbd22", "#17becf", "#aec7e8", "#9467bd", 
+            "#e377c2", "#f7b6d2", "#c5b0d5", "#c49c94"
+        ]
+        line_styles = ["-", "--"]
 
         plt.figure(figsize=(12, 10))
         for feature_idx, feature_name in enumerate(feature_names):
-            color_idx = feature_idx % 20  # Cycle through the 20 colors
-            line_style = next(line_styles)  # Alternate between solid and dashed lines
-            plt.plot(time_steps, median_shap_values[:, feature_idx], label=feature_name, color=colors[color_idx], linestyle=line_style)
+            color = custom_colors[feature_idx % 16]
+            line_style = line_styles[(feature_idx // 16) % 2]
+
+            plt.plot(time_steps, median_shap_values[:, feature_idx], label=feature_name, color=color, linestyle=line_style)
 
         plt.xticks(np.arange(-days_to_plot, 1, max(10, days_to_plot // 7)))
         plt.title("Overall Contribution of {} Features to Prediction Over Time".format(
