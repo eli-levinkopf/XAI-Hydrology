@@ -10,6 +10,8 @@ import shap
 import logging
 from torch import Tensor, nn
 from pathlib import Path
+import matplotlib.cm as cm
+from itertools import cycle
 
 torch.backends.cudnn.enabled = False
 
@@ -345,9 +347,6 @@ class SHAPAnalysis(ExplainabilityBase):
             dynamic_shap_values = shap_values[:, :self.seq_length * dyn_emb_dim].reshape(-1, self.seq_length, dyn_emb_dim)
             median_shap_values = np.median(np.abs(dynamic_shap_values), axis=0)  # [seq_length, dyn_emb_dim]
             feature_names = [f"Embed {i+1}" for i in range(dyn_emb_dim)]
-            # Create a colormap with a unique color for each embedding dimension.
-            cmap = plt.get_cmap("viridis", dyn_emb_dim)
-            colors = [cmap(i) for i in range(dyn_emb_dim)]
         else:
             # Use original dynamic features.
             n_dynamic = len(self.dynamic_features)
@@ -360,13 +359,15 @@ class SHAPAnalysis(ExplainabilityBase):
         median_shap_values = median_shap_values[-days_to_plot:]  # Take the last days_to_plot days
         time_steps = np.arange(-days_to_plot, 0)
 
+        cmap = cm.get_cmap("tab20", 20)
+        colors = [cmap(i) for i in range(20)]
+        line_styles = cycle(["-", "--"])
+
         plt.figure(figsize=(12, 10))
         for feature_idx, feature_name in enumerate(feature_names):
-            # If colors have been defined (in embedding mode), use them for each line
-            if self.use_embedding:
-                plt.plot(time_steps, median_shap_values[:, feature_idx], label=feature_name, color=colors[feature_idx])
-            else:
-                plt.plot(time_steps, median_shap_values[:, feature_idx], label=feature_name)
+            color_idx = feature_idx % 20  # Cycle through the 20 colors
+            line_style = next(line_styles)  # Alternate between solid and dashed lines
+            plt.plot(time_steps, median_shap_values[:, feature_idx], label=feature_name, color=colors[color_idx], linestyle=line_style)
 
         plt.xticks(np.arange(-days_to_plot, 1, max(10, days_to_plot // 7)))
         plt.title("Overall Contribution of {} Features to Prediction Over Time".format(
