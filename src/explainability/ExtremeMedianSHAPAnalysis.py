@@ -222,23 +222,27 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
         torch.cuda.empty_cache()
         return shap_values, {"x_d": final_x_d, "x_s": final_x_s}, basin_ids
 
-    def aggregate_shap_by_basin(self, shap_values: np.ndarray, basin_ids: np.ndarray, aggregation: str = "median") -> Dict[str, np.ndarray]:
+    def aggregate_shap_by_basin(self, shap_values: np.ndarray, basin_ids: np.ndarray, aggregation: str = "median") -> Dict[str, Union[Dict[str, np.ndarray], list]]:
         """
         Aggregate SHAP values for each basin to produce one feature importance vector per basin.
         The input shap_values are assumed to be of shape [n_samples, total_features] where:
           total_features = (seq_length * n_dynamic) + n_static.
         For each sample, the dynamic part (first seq_length*n_dynamic features) is reshaped to [seq_length, n_dynamic]
         and then summed over time to produce a vector of shape [n_dynamic]. This is concatenated with the static part 
-        (n_static features, squeezed to one dimension) to yield a combined vector of shape [n_dynamic+n_static].
+        (n_static features) to yield a combined vector of shape [n_dynamic+n_static].
         Then, aggregation (median or mean) is computed over all samples for a basin.
         
+        Both the aggregated values and the feature names are saved together to disk.
+
         Args:
-            shap_values (np.ndarray): Array of shape [n_samples, total_features] with SHAP values.
-            basin_ids (np.ndarray): Array of shape [n_samples] with basin IDs.
-            aggregation (str): "median" (default) or "mean".
+            shap_values (np.ndarray): Array of shape [n_samples, total_features] with SHAP values
+            basin_ids (np.ndarray): Array of shape [n_samples] with basin IDs
+            aggregation (str): "median" (default) or "mean"
             
         Returns:
-            dict: Mapping from basin_id to an aggregated importance vector of shape [n_dynamic+n_static].
+            dict: A dictionary with two keys:
+                - "aggregated": mapping from basin_id to an aggregated importance vector of shape [n_dynamic+n_static]
+                - "feature_names": list of feature names (length = n_dynamic+n_static)
         """
         n_dynamic = len(self.dynamic_features)
 
@@ -249,13 +253,15 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
             basin_shap = shap_values[indices]  # shape: [n_samples_basin, total_features]
             combined_samples = []
             for sample in basin_shap:
+                # Dynamic part: reshape and sum over time to aggregate to one value per dynamic feature.
                 dyn_part = sample[:self.seq_length * n_dynamic].reshape(self.seq_length, n_dynamic)
-                # Sum dynamic contributions over time:
                 dyn_agg = dyn_part.sum(axis=0)  # shape: (n_dynamic,)
+                # Static part: slice out and squeeze to ensure 1D.
                 stat_part = sample[self.seq_length * n_dynamic:]
                 if stat_part.ndim > 1:
                     stat_part = np.squeeze(stat_part, axis=-1)
-                combined = np.concatenate([dyn_agg, stat_part])  # shape: (n_dynamic+n_static,)
+                # Concatenate dynamic and static parts.
+                combined = np.concatenate([dyn_agg, stat_part])
                 combined_samples.append(combined)
             combined_samples = np.array(combined_samples)  # shape: [n_samples_basin, n_dynamic+n_static]
             if aggregation == "median":
@@ -266,13 +272,15 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
                 raise ValueError("Invalid aggregation method. Choose 'median' or 'mean'.")
             aggregated[basin] = aggregated_value
 
-        logging.info(f"Aggregated SHAP values shape (for one basin): {aggregated[unique_basins[0]].shape}")
-        
+        out = {
+            "aggregated": aggregated,
+            "feature_names": self.dynamic_features + self.static_features
+        }
         agg_fname = os.path.join(self.results_folder, f"aggregated_shap_{'embedding_' if self.use_embedding else ''}{self.filter_type}.p")
         with open(agg_fname, "wb") as f:
-            pickle.dump(aggregated, f)
-        logging.info(f"Aggregated SHAP values saved to {agg_fname}")
-        return aggregated
+            pickle.dump(out, f)
+        logging.info(f"Aggregated SHAP values and feature names saved to {agg_fname}")
+        return out
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
