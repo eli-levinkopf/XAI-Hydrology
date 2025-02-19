@@ -225,25 +225,41 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
     def aggregate_shap_by_basin(self, shap_values: np.ndarray, basin_ids: np.ndarray, aggregation: str = "median") -> Dict[str, np.ndarray]:
         """
         Aggregate SHAP values for each basin to produce one feature importance vector per basin.
-        The aggregated dictionary is saved to disk.
-
+        The input shap_values are assumed to be of shape [n_samples, total_features] where:
+          total_features = (seq_length * n_dynamic) + n_static.
+        For each sample, the dynamic part (first seq_length*n_dynamic features) is reshaped to [seq_length, n_dynamic]
+        and then summed across time to produce a vector of shape [n_dynamic]. This is concatenated with the static part 
+        (n_static features) to yield a combined vector of shape [n_dynamic+n_static].
+        Then, aggregation (median or mean) is computed over all samples for a basin.
+        
         Args:
-            shap_values (np.ndarray): Array of shape [n_samples, n_features] with SHAP values.
+            shap_values (np.ndarray): Array of shape [n_samples, total_features] with SHAP values.
             basin_ids (np.ndarray): Array of shape [n_samples] with basin IDs.
             aggregation (str): "median" (default) or "mean".
             
         Returns:
-            dict: Mapping from basin_id to an aggregated importance vector of shape [n_features].
+            dict: Mapping from basin_id to an aggregated importance vector of shape [n_dynamic+n_static].
         """
+        n_dynamic = len(self.dynamic_features)
+
         unique_basins = np.unique(basin_ids)
         aggregated = {}
         for basin in unique_basins:
             indices = np.where(basin_ids == basin)[0]
-            basin_shap = shap_values[indices]
+            basin_shap = shap_values[indices]  # shape: [n_samples_basin, total_features]
+            combined_samples = []
+            for sample in basin_shap:
+                dyn_part = sample[:self.seq_length * n_dynamic].reshape(self.seq_length, n_dynamic)
+                # Sum dynamic contributions over time:
+                dyn_agg = dyn_part.sum(axis=0)  # shape: (n_dynamic,)
+                stat_part = sample[self.seq_length * n_dynamic:]  # shape: (n_static,)
+                combined = np.concatenate([dyn_agg, stat_part])  # shape: (n_dynamic+n_static,)
+                combined_samples.append(combined)
+            combined_samples = np.array(combined_samples)  # shape: [n_samples_basin, n_dynamic+n_static]
             if aggregation == "median":
-                aggregated_value = np.median(basin_shap, axis=0)
+                aggregated_value = np.median(combined_samples, axis=0)
             elif aggregation == "mean":
-                aggregated_value = np.mean(basin_shap, axis=0)
+                aggregated_value = np.mean(combined_samples, axis=0)
             else:
                 raise ValueError("Invalid aggregation method. Choose 'median' or 'mean'.")
             aggregated[basin] = aggregated_value
