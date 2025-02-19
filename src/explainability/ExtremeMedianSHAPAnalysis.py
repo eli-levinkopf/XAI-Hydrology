@@ -49,7 +49,12 @@ def median_filter_fn(y, lower_percentile: float = 45, upper_percentile: float = 
     return (targets >= lower) & (targets <= upper)
 
 class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
-    def __init__(self, run_dir: str, epoch: int, num_samples: int, filter_type: str = "extreme", use_embedding: bool = False) -> None:
+    def __init__(self, run_dir: str, 
+                 epoch: int, 
+                 num_samples: int = 50000, 
+                 period: str = "test",
+                 filter_type: str = "extreme", 
+                 use_embedding: bool = False) -> None:
         """
         Initialize ExtremeMedianSHAPAnalysis.
 
@@ -57,9 +62,11 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
             run_dir (str): Path to the run directory.
             epoch (int): Epoch number to load the model.
             num_samples (int): Total number of samples for SHAP analysis.
+            period (str): The period for which to run the analysis ("train", "validation", or "test").
             filter_type (str): Either "extreme" (default) or "median". Determines which filter to use.
             use_embedding (bool): If True, run SHAP on the embedding outputs.
         """
+        self.period = period.lower()
         self.filter_type = filter_type.lower()
         if self.filter_type not in ["extreme", "median"]:
             raise ValueError("Invalid filter_type. Choose 'extreme' or 'median'.")
@@ -68,11 +75,11 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
         else:
             self.filter_fn = lambda y: median_filter_fn(y, lower_percentile=45, upper_percentile=55)
         
-        super().__init__(run_dir, epoch, num_samples, analysis_name=f"shap_{self.filter_type}", use_embedding=use_embedding)
+        super().__init__(run_dir, epoch, num_samples, use_embedding=use_embedding)
 
     def _random_sample_from_file(self):
         """
-        Load each basin's data from the validation output file and apply the filter function on the target y.
+        Load each basin's data from the period-specific output file and apply the filter function on the target y.
         Records basin IDs for each selected sample.
         
         Returns:
@@ -80,16 +87,16 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
             final_x_s (np.ndarray): Static features of shape [n_filtered_samples, n_static].
             basin_ids_all (np.ndarray): 1D array of basin IDs corresponding to each sample.
         """
-        validation_output_path = os.path.join(
+        file_path = os.path.join(
             self.run_dir,
-            "validation",
+            self.period,
             f"model_epoch{self.epoch:03d}",
-            "validation_all_output.p"
+            f"{self.period}_all_output.p"
         )
-        if not os.path.exists(validation_output_path):
-            raise FileNotFoundError(f"Validation output file not found at {validation_output_path}")
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"Output file not found at {file_path}")
 
-        with open(validation_output_path, "rb") as f:
+        with open(file_path, "rb") as f:
             data = pickle.load(f)
 
         sampled_x_d_list, sampled_x_s_list, basin_ids_list = [], [], []
@@ -232,13 +239,20 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run SHAP analysis.")
     parser.add_argument('--run_dir', type=str, required=True, help='Path to the run directory.')
     parser.add_argument('--epoch', type=int, required=True, help='Which epoch checkpoint to load.')
-    parser.add_argument('--num_samples', type=int, default=100000, help='Number of samples to use for SHAP analysis.')
+    parser.add_argument('--num_samples', type=int, default=50000, help='Number of samples to use for SHAP analysis.')
+    parser.add_argument('--period', type=str, default="test", help='Which period to run the analysis on.')
+    parser.add_argument('--filter_type', type=str, default="extreme", help='Filter type: "extreme" or "median".')
     parser.add_argument('--reuse_shap', action='store_true', help='If set, reuse existing SHAP results.')
     parser.add_argument('--use_embedding', action='store_true', help='If set, run SHAP on embedding outputs.')
     args = parser.parse_args()
 
-    analysis = ExtremeMedianSHAPAnalysis(args.run_dir, args.epoch, args.num_samples)
+    analysis = ExtremeMedianSHAPAnalysis(args.run_dir, 
+                                         args.epoch, 
+                                         args.num_samples, 
+                                         args.period, 
+                                         args.filter_type, 
+                                         args.use_embedding)
     shap_values, _, basin_ids = analysis.run_shap()
     # Aggregate per basin for clustering
-    aggregated_importance = analysis.aggregate_shap_by_basin(shap_values, basin_ids, aggregation="median")
+    aggregated_importance = analysis.aggregate_shap_by_basin(shap_values, basin_ids)
     # aggregated_importance is a dict mapping each basin_id to a feature importance vector
