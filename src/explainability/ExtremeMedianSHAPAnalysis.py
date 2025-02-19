@@ -19,11 +19,11 @@ def extreme_filter_fn(y, percentile: float = 90):
     Select sequences where the target streamflow (from y) is above the given percentile.
     
     Args:
-        y: Array or tensor of shape [n_sequences, 1].
-        percentile: Percentile cutoff (default 90 for top 10%).
+        y: Array or tensor of shape [n_sequences, 1]
+        percentile: Percentile cutoff (default 90 for top 10%)
         
     Returns:
-        A boolean mask of shape [n_sequences].
+        A boolean mask of shape [n_sequences]
     """
     targets = y.squeeze(1)
     targets_np = targets.cpu().numpy() if torch.is_tensor(targets) else targets
@@ -35,12 +35,12 @@ def median_filter_fn(y, lower_percentile: float = 45, upper_percentile: float = 
     Select sequences where the target streamflow (from y) is between the lower and upper percentiles.
     
     Args:
-        y: Array or tensor of shape [n_sequences, 1].
-        lower_percentile: Lower percentile cutoff (default 45).
-        upper_percentile: Upper percentile cutoff (default 55).
+        y: Array or tensor of shape [n_sequences, 1]
+        lower_percentile: Lower percentile cutoff (default 45)
+        upper_percentile: Upper percentile cutoff (default 55)
         
     Returns:
-        A boolean mask of shape [n_sequences].
+        A boolean mask of shape [n_sequences]
     """
     targets = y.squeeze(1)
     targets_np = targets.cpu().numpy() if torch.is_tensor(targets) else targets
@@ -56,26 +56,25 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
                  filter_type: str = "extreme", 
                  use_embedding: bool = False) -> None:
         """
-        Initialize ExtremeMedianSHAPAnalysis.
+        Initialize ExtremeMedianSHAPAnalysis
 
         Args:
-            run_dir (str): Path to the run directory.
-            epoch (int): Epoch number to load the model.
-            num_samples (int): Total number of samples for SHAP analysis.
-            period (str): The period to run the analysis on ("train", "validation", or "test").
-            filter_type (str): Either "extreme" (default) or "median". Determines which filter to use.
-            use_embedding (bool): If True, run SHAP on the embedding outputs.
+            run_dir (str): Path to the run directory
+            epoch (int): Epoch number to load the model
+            num_samples (int): Total number of samples for SHAP analysis
+            period (str): The period to run the analysis on ("train", "validation", or "test")
+            filter_type (str): Either "extreme" (default) or "median". Determines which filter to use
+            use_embedding (bool): If True, run SHAP on the embedding outputs
         """
-        self.period = period.lower()
         self.filter_type = filter_type.lower()
         if self.filter_type not in ["extreme", "median"]:
-            raise ValueError("Invalid filter_type. Choose 'extreme' or 'median'.")
+            raise ValueError("Invalid filter_type. Choose 'extreme' or 'median'")
         if self.filter_type == "extreme":
             self.filter_fn = lambda y: extreme_filter_fn(y, percentile=90)
         else:
             self.filter_fn = lambda y: median_filter_fn(y, lower_percentile=45, upper_percentile=55)
         
-        super().__init__(run_dir, epoch, num_samples, use_embedding=use_embedding)
+        super().__init__(run_dir, epoch, num_samples, analysis_name="shap", use_embedding=use_embedding, period=period)
 
     def _random_sample_from_file(self):
         """
@@ -83,9 +82,9 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
         Records basin IDs for each selected sample. Then, sample an equal number of samples from each basin.
         
         Returns:
-            final_x_d (np.ndarray): Dynamic features of shape [n_filtered_samples, seq_length, n_dynamic].
-            final_x_s (np.ndarray): Static features of shape [n_filtered_samples, n_static].
-            basin_ids_all (np.ndarray): 1D array of basin IDs corresponding to each sample.
+            final_x_d (np.ndarray): Dynamic features of shape [n_filtered_samples, seq_length, n_dynamic]
+            final_x_s (np.ndarray): Static features of shape [n_filtered_samples, n_static]
+            basin_ids_all (np.ndarray): 1D array of basin IDs corresponding to each sample
         """
         file_path = os.path.join(
             self.run_dir,
@@ -272,6 +271,8 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
                 raise ValueError("Invalid aggregation method. Choose 'median' or 'mean'.")
             aggregated[basin] = aggregated_value
 
+        logging.info(f"Aggregated SHAP values shape (for one basin): {aggregated[unique_basins[0]].shape}")
+
         out = {
             "aggregated": aggregated,
             "feature_names": self.dynamic_features + self.static_features
@@ -288,7 +289,7 @@ if __name__ == "__main__":
     parser.add_argument('--run_dir', type=str, required=True, help='Path to the run directory.')
     parser.add_argument('--epoch', type=int, required=True, help='Which epoch checkpoint to load.')
     parser.add_argument('--num_samples', type=int, default=100000, help='Total number of samples to use for SHAP analysis.')
-    parser.add_argument('--period', type=str, default="test", help='Which period to run the analysis on.')
+    parser.add_argument('--period', type=str, default="test", help='Period to load data from (train/validation/test).')
     parser.add_argument('--filter_type', type=str, default="extreme", help='Filter type: "extreme" or "median".')
     parser.add_argument('--reuse_shap', action='store_true', help='If set, reuse existing SHAP results.')
     parser.add_argument('--use_embedding', action='store_true', help='If set, run SHAP on embedding outputs.')

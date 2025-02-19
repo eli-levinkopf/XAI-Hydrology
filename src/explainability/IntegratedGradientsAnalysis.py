@@ -17,7 +17,7 @@ IG_STEPS = 100
 
 
 class IntegratedGradientsAnalysis(ExplainabilityBase):
-    def __init__(self, run_dir, epoch, num_samples):
+    def __init__(self, run_dir, epoch, num_samples, period: str = "test"):
         """
         Initialize IntegratedGradientsAnalysis for a trained NeuralHydrology model.
         
@@ -25,8 +25,10 @@ class IntegratedGradientsAnalysis(ExplainabilityBase):
             run_dir (str): Path to the run directory.
             epoch (int): Epoch number to load the model.
             num_samples (int): Number of samples to use for analysis.
+            period (str): The period to load data from ("train", "validation", or "test").
         """
-        super().__init__(run_dir, epoch, num_samples, analysis_name="integrated_gradients")
+        super().__init__(run_dir, epoch, num_samples, analysis_name="integrated_gradients", period=period)
+
 
     @staticmethod
     def integrated_gradients(model, baseline, inputs, steps=50):
@@ -234,11 +236,12 @@ def main():
     parser.add_argument('--epoch', type=int, required=True, help='Which epoch checkpoint to load.')
     parser.add_argument('--num_samples', type=int, default=100000,
                         help='Number of samples to use for IG analysis.')
+    parser.add_argument('--period', type=str, default="validation", help='Period to load data from (train/validation/test).')
     parser.add_argument('--reuse_ig', action='store_true',
                         help='If set, reuse ig_values.npy and ig_inputs.npz if they exist.')
 
     args = parser.parse_args()
-    analysis = IntegratedGradientsAnalysis(args.run_dir, args.epoch, args.num_samples)
+    analysis = IntegratedGradientsAnalysis(args.run_dir, args.epoch, args.num_samples, period=args.period)
 
     ig_values_path = os.path.join(analysis.results_folder, "ig_values.npy")
     inputs_path = os.path.join(analysis.results_folder, "ig_inputs.npz")

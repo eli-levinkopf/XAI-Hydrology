@@ -11,7 +11,7 @@ from neuralhydrology.modelzoo.cudalstm import CudaLSTM
 
 
 class ExplainabilityBase:
-    def __init__(self, run_dir, epoch, num_samples, analysis_name):
+    def __init__(self, run_dir, epoch, num_samples, analysis_name, period="test"):
         """
         Base class for any explainability analysis on a NeuralHydrology model.
 
@@ -20,11 +20,13 @@ class ExplainabilityBase:
             epoch (int): Epoch number to load the model.
             num_samples (int): Number of samples to use for analysis.
             analysis_name (str): A short name for the analysis (e.g., "shap", "integrated_gradients").
+            period (str): The period to load data from (e.g., "train", "validation", "test").
         """
         self.run_dir = run_dir
         self.epoch = epoch
         self.num_samples = num_samples
         self.analysis_name = analysis_name
+        self.period = period.lower()
 
         self.cfg = self._load_config()
         self.seq_length = self.cfg["seq_length"]
@@ -73,11 +75,13 @@ class ExplainabilityBase:
         return model
 
     def _setup_results_folder(self):
-        """Set up the folder structure for saving results (analysis_name_results/model_epochXXX)."""
-        results_folder = os.path.join(self.run_dir, f"{self.analysis_name}_results")
-        epoch_folder = os.path.join(results_folder, f"model_epoch{self.epoch:03d}")
-        os.makedirs(epoch_folder, exist_ok=True)
-        return epoch_folder
+        """
+        Set up the folder structure for saving results under:
+        run_dir/<period>/model_epoch<epoch>/<analysis_name>/
+        """
+        results_folder = os.path.join(self.run_dir, self.period, f"model_epoch{self.epoch:03d}", self.analysis_name)
+        os.makedirs(results_folder, exist_ok=True)
+        return results_folder
 
     def _preprocess_basin_data(self, x_d, x_s):
         """
@@ -101,23 +105,26 @@ class ExplainabilityBase:
 
     def _random_sample_from_file(self):
         """
-        Efficiently sample data from the validation .p file without loading everything into memory.
+        Efficiently sample data from the period-specific output .p file without loading everything into memory.
+        The file is expected at:
+            run_dir/<period>/model_epoch<XXX>/<period>_all_output.p
 
         Returns:
             (final_x_d, final_x_s) as np.ndarray:
                 - final_x_d: shape [num_samples, seq_length, n_dynamic_features]
                 - final_x_s: shape [num_samples, n_static_features]
         """
-        validation_output_path = os.path.join(
+        file_path = os.path.join(
             self.run_dir,
-            "validation",
+            self.period,
             f"model_epoch{self.epoch:03d}",
-            "validation_all_output.p"
+            f"{self.period}_all_output.p"
         )
-        if not os.path.exists(validation_output_path):
-            raise FileNotFoundError(f"Validation output file not found at {validation_output_path}")
 
-        with open(validation_output_path, "rb") as f:
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"Output file not found at {file_path}")
+
+        with open(file_path, "rb") as f:
             data = pickle.load(f)
 
         # First pass: count valid samples per basin

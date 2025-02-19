@@ -22,7 +22,7 @@ BATCH_SIZE = 256
 
 
 class SHAPAnalysis(ExplainabilityBase):
-    def __init__(self, run_dir: Union[str, Path], epoch: int, num_samples: int, use_embedding: bool = False) -> None:
+    def __init__(self, run_dir: Union[str, Path], epoch: int, num_samples: int = 100000, period: str = "test", use_embedding: bool = False) -> None:
         """
         Initialize SHAPAnalysis for a trained NeuralHydrology model.
         
@@ -31,8 +31,9 @@ class SHAPAnalysis(ExplainabilityBase):
             epoch: Epoch number to load the model.
             num_samples: Number of samples for SHAP analysis.
             use_embedding: If True, run SHAP on the embedding outputs.
+            period: The period to load data from ("train", "validation", or "test").
         """
-        super().__init__(run_dir, epoch, num_samples, analysis_name="shap")
+        super().__init__(run_dir, epoch, num_samples, analysis_name="shap", period=period)
         self.use_embedding = use_embedding
 
     def _get_embedding_outputs(self, final_x_d: np.ndarray, final_x_s: np.ndarray) -> np.ndarray:
@@ -512,11 +513,12 @@ def main():
     parser.add_argument('--run_dir', type=str, required=True, help='Path to the run directory.')
     parser.add_argument('--epoch', type=int, required=True, help='Which epoch checkpoint to load.')
     parser.add_argument('--num_samples', type=int, default=100000, help='Number of samples to use for SHAP analysis.')
+    parser.add_argument('--period', type=str, default="test", help='Period to load data from (train/validation/test).')
     parser.add_argument('--reuse_shap', action='store_true', help='If set, reuse existing SHAP results.')
     parser.add_argument('--use_embedding', action='store_true', help='If set, run SHAP on embedding outputs.')
 
     args = parser.parse_args()
-    analysis = SHAPAnalysis(args.run_dir, args.epoch, args.num_samples, use_embedding=args.use_embedding)
+    analysis = SHAPAnalysis(args.run_dir, args.epoch, args.num_samples, period=args.period, use_embedding=args.use_embedding)
 
     if args.reuse_shap:
         shap_values_path = os.path.join(analysis.results_folder, f"{'shap_values_embedding' if args.use_embedding else 'shap_values'}.npy")
