@@ -110,20 +110,23 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
                 x_s = x_s.unsqueeze(0)
             if x_s.shape[0] == 1 and x_d.shape[0] > 1:
                 x_s = x_s.repeat(x_d.shape[0], 1)
-            # Preprocess to remove rows with NaNs.
+            # Preprocess to remove rows with NaNs
             x_d, x_s = self._preprocess_basin_data(x_d, x_s)
-            valid_y = ~torch.isnan(y).squeeze(1)
+            # Compute valid_y mask from y and convert it to a NumPy array
+            valid_y = (~torch.isnan(y).squeeze(1)).cpu().numpy()
             x_d = x_d[valid_y]
             x_s = x_s[valid_y]
-            y   = y[valid_y]
-            # Apply the filter function on y.
+            y   = y[valid_y]  # y remains as torch tensor
+            # Apply the filter function on y
             mask = self.filter_fn(y)
+            if torch.is_tensor(mask):
+                mask = mask.cpu().numpy()
             x_d = x_d[mask]
             x_s = x_s[mask]
             y   = y[mask]
             if x_d.shape[0] > 0:
-                per_basin_x_d[basin_id] = x_d.cpu().numpy()
-                per_basin_x_s[basin_id] = x_s.cpu().numpy()
+                per_basin_x_d[basin_id] = x_d
+                per_basin_x_s[basin_id] = x_s
 
         if not per_basin_x_d:
             raise ValueError("No samples selected after applying the filter.")
