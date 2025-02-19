@@ -51,7 +51,7 @@ def median_filter_fn(y, lower_percentile: float = 45, upper_percentile: float = 
 class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
     def __init__(self, run_dir: str, 
                  epoch: int, 
-                 num_samples: int = 50000, 
+                 num_samples: int = 100000, 
                  period: str = "test",
                  filter_type: str = "extreme", 
                  use_embedding: bool = False) -> None:
@@ -62,7 +62,7 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
             run_dir (str): Path to the run directory.
             epoch (int): Epoch number to load the model.
             num_samples (int): Total number of samples for SHAP analysis.
-            period (str): The period for which to run the analysis ("train", "validation", or "test").
+            period (str): The period to run the analysis on ("train", "validation", or "test").
             filter_type (str): Either "extreme" (default) or "median". Determines which filter to use.
             use_embedding (bool): If True, run SHAP on the embedding outputs.
         """
@@ -80,7 +80,7 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
     def _random_sample_from_file(self):
         """
         Load each basin's data from the period-specific output file and apply the filter function on the target y.
-        Records basin IDs for each selected sample.
+        Records basin IDs for each selected sample. Then, sample an equal number of samples from each basin.
         
         Returns:
             final_x_d (np.ndarray): Dynamic features of shape [n_filtered_samples, seq_length, n_dynamic].
@@ -99,8 +99,9 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
         with open(file_path, "rb") as f:
             data = pickle.load(f)
 
-        sampled_x_d_list, sampled_x_s_list, basin_ids_list = [], [], []
-
+        # Collect filtered samples per basin
+        per_basin_x_d = {}
+        per_basin_x_s = {}
         for basin_id, basin_data in tqdm(data.items(), desc="Filtering basins"):
             x_d = torch.tensor(basin_data["x_d"], dtype=torch.float32)  # [n_seq, seq_length, n_dynamic]
             x_s = torch.tensor(basin_data["x_s"], dtype=torch.float32)  # [1, n_static]
@@ -120,20 +121,39 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
             x_d = x_d[mask]
             x_s = x_s[mask]
             y   = y[mask]
-            # Record basin IDs for each selected sample.
-            basin_ids = np.array([basin_id] * x_d.shape[0])
-            sampled_x_d_list.append(x_d)
-            sampled_x_s_list.append(x_s)
-            basin_ids_list.append(basin_ids)
+            if x_d.shape[0] > 0:
+                per_basin_x_d[basin_id] = x_d.cpu().numpy()
+                per_basin_x_s[basin_id] = x_s.cpu().numpy()
 
-        if not sampled_x_d_list:
+        if not per_basin_x_d:
             raise ValueError("No samples selected after applying the filter.")
 
-        final_x_d = np.concatenate(sampled_x_d_list, axis=0)
-        final_x_s = np.concatenate(sampled_x_s_list, axis=0)
-        basin_ids_all = np.concatenate(basin_ids_list, axis=0)
+        # Determine how many basins have samples
+        basin_ids_list = list(per_basin_x_d.keys())
+        n_basins = len(basin_ids_list)
+        # Compute per-basin target sample count
+        per_basin_target = self.num_samples // n_basins
+        logging.info(f"Sampling up to {per_basin_target} samples per basin from {n_basins} basins.")
 
-        # Shuffle the combined data while keeping basin_ids aligned.
+        equal_x_d_list, equal_x_s_list, equal_basin_ids_list = [], [], []
+        for basin_id in basin_ids_list:
+            basin_x_d = per_basin_x_d[basin_id]
+            basin_x_s = per_basin_x_s[basin_id]
+            n_basin = basin_x_d.shape[0]
+            if n_basin > per_basin_target:
+                chosen_indices = np.random.choice(n_basin, size=per_basin_target, replace=False)
+                basin_x_d = basin_x_d[chosen_indices]
+                basin_x_s = basin_x_s[chosen_indices]
+            # Else, take all available samples
+            equal_x_d_list.append(basin_x_d)
+            equal_x_s_list.append(basin_x_s)
+            equal_basin_ids_list.append(np.array([basin_id] * basin_x_d.shape[0]))
+
+        final_x_d = np.concatenate(equal_x_d_list, axis=0)
+        final_x_s = np.concatenate(equal_x_s_list, axis=0)
+        basin_ids_all = np.concatenate(equal_basin_ids_list, axis=0)
+
+        # Shuffle the combined data while keeping basin_ids aligned
         indices = np.arange(len(final_x_d))
         np.random.shuffle(indices)
         final_x_d = final_x_d[indices]
@@ -235,24 +255,23 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
     parser = argparse.ArgumentParser(description="Run SHAP analysis.")
     parser.add_argument('--run_dir', type=str, required=True, help='Path to the run directory.')
     parser.add_argument('--epoch', type=int, required=True, help='Which epoch checkpoint to load.')
-    parser.add_argument('--num_samples', type=int, default=50000, help='Number of samples to use for SHAP analysis.')
+    parser.add_argument('--num_samples', type=int, default=100000, help='Total number of samples to use for SHAP analysis.')
     parser.add_argument('--period', type=str, default="test", help='Which period to run the analysis on.')
     parser.add_argument('--filter_type', type=str, default="extreme", help='Filter type: "extreme" or "median".')
     parser.add_argument('--reuse_shap', action='store_true', help='If set, reuse existing SHAP results.')
     parser.add_argument('--use_embedding', action='store_true', help='If set, run SHAP on embedding outputs.')
     args = parser.parse_args()
 
-    analysis = ExtremeMedianSHAPAnalysis(args.run_dir, 
-                                         args.epoch, 
-                                         args.num_samples, 
-                                         args.period, 
-                                         args.filter_type, 
-                                         args.use_embedding)
-    shap_values, _, basin_ids = analysis.run_shap()
-    # Aggregate per basin for clustering
-    aggregated_importance = analysis.aggregate_shap_by_basin(shap_values, basin_ids)
-    # aggregated_importance is a dict mapping each basin_id to a feature importance vector
+    analysis = ExtremeMedianSHAPAnalysis(
+        run_dir=args.run_dir,
+        epoch=args.epoch,
+        num_samples=args.num_samples,
+        period=args.period,
+        filter_type=args.filter_type,
+        use_embedding=args.use_embedding
+    )
+    shap_values, inputs, basin_ids = analysis.run_shap()
+    aggregated_importance = analysis.aggregate_shap_by_basin(shap_values, basin_ids, aggregation="median")
