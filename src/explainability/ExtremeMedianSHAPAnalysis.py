@@ -228,8 +228,8 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
         The input shap_values are assumed to be of shape [n_samples, total_features] where:
           total_features = (seq_length * n_dynamic) + n_static.
         For each sample, the dynamic part (first seq_length*n_dynamic features) is reshaped to [seq_length, n_dynamic]
-        and then summed across time to produce a vector of shape [n_dynamic]. This is concatenated with the static part 
-        (n_static features) to yield a combined vector of shape [n_dynamic+n_static].
+        and then summed over time to produce a vector of shape [n_dynamic]. This is concatenated with the static part 
+        (n_static features, squeezed to one dimension) to yield a combined vector of shape [n_dynamic+n_static].
         Then, aggregation (median or mean) is computed over all samples for a basin.
         
         Args:
@@ -252,7 +252,9 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
                 dyn_part = sample[:self.seq_length * n_dynamic].reshape(self.seq_length, n_dynamic)
                 # Sum dynamic contributions over time:
                 dyn_agg = dyn_part.sum(axis=0)  # shape: (n_dynamic,)
-                stat_part = sample[self.seq_length * n_dynamic:]  # shape: (n_static,)
+                stat_part = sample[self.seq_length * n_dynamic:]
+                if stat_part.ndim > 1:
+                    stat_part = np.squeeze(stat_part, axis=-1)
                 combined = np.concatenate([dyn_agg, stat_part])  # shape: (n_dynamic+n_static,)
                 combined_samples.append(combined)
             combined_samples = np.array(combined_samples)  # shape: [n_samples_basin, n_dynamic+n_static]
