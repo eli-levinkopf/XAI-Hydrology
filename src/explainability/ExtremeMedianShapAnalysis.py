@@ -49,7 +49,8 @@ def median_filter_fn(y, lower_percentile: float = 45, upper_percentile: float = 
     return (targets >= lower) & (targets <= upper)
 
 class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
-    def __init__(self, run_dir: str, 
+    def __init__(self, 
+                 run_dir: str, 
                  epoch: int, 
                  num_samples: int = 100000, 
                  period: str = "test",
@@ -74,7 +75,7 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
         else:
             self.filter_fn = lambda y: median_filter_fn(y, lower_percentile=45, upper_percentile=55)
         
-        super().__init__(run_dir, epoch, num_samples, analysis_name="shap", use_embedding=use_embedding, period=period)
+        super().__init__(run_dir, epoch, num_samples, period=period, use_embedding=use_embedding)
 
     def _random_sample_from_file(self):
         """
