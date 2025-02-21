@@ -35,7 +35,7 @@ def median_filter_fn(y, lower_percentile: float = 45, upper_percentile: float = 
     Select sequences where the target streamflow (from y) is between the lower and upper percentiles.
     
     Args:
-        y: Array or tensor of shape [n_sequences, 1] 
+        y: Array or tensor of shape [n_sequences, 1]
         lower_percentile: Lower percentile cutoff (default 45)
         upper_percentile: Upper percentile cutoff (default 55)
         
