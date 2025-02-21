@@ -116,7 +116,7 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
             valid_y = (~torch.isnan(y).squeeze(1)).cpu().numpy()
             x_d = x_d[valid_y]
             x_s = x_s[valid_y]
-            y   = y[valid_y]  # y remains as torch tensor
+            y   = y[valid_y]
             # Apply the filter function on y
             mask = self.filter_fn(y)
             if torch.is_tensor(mask):
@@ -165,6 +165,31 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
 
         return final_x_d, final_x_s, basin_ids_all
 
+    def _get_stratified_background(self, combined_inputs_tensor: torch.Tensor, basin_ids: np.ndarray) -> torch.Tensor:
+        """
+        Create a stratified background tensor by ensuring that every basin is represented
+        
+        Args:
+            combined_inputs_tensor (torch.Tensor): Combined input tensor of shape [n_samples, total_features]
+            basin_ids (np.ndarray): Array of shape [n_samples] with basin IDs
+        
+        Returns:
+            torch.Tensor: A background tensor with gradients enabled
+        """
+        unique_basins = np.unique(basin_ids)
+        # Determine k = number of samples to pick per basin; at least one sample per basin
+        k = max(1, BACKGROUND_SIZE // len(unique_basins))
+        background_indices = []
+        for b in unique_basins:
+            basin_indices = np.where(basin_ids == b)[0]
+            if len(basin_indices) <= k:
+                background_indices.extend(basin_indices.tolist())
+            else:
+                background_indices.extend(np.random.choice(basin_indices, size=k, replace=False).tolist())
+        background_indices = np.array(background_indices)
+        background_tensor = combined_inputs_tensor[background_indices].clone().detach().requires_grad_(True)
+        return background_tensor
+
     def run_shap(self) -> Tuple[np.ndarray, Dict[str, np.ndarray], np.ndarray]:
         """
         Run SHAP analysis on the filtered samples.
@@ -189,12 +214,7 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
 
         logging.info(f"Combined inputs shape: {combined_inputs_tensor.shape}")
         
-        background_indices = np.random.choice(
-            range(len(combined_inputs_tensor)),
-            size=min(BACKGROUND_SIZE, len(combined_inputs_tensor)),
-            replace=False
-        )
-        background_tensor = combined_inputs_tensor[background_indices].clone().detach().requires_grad_(True)
+        background_tensor = self._get_stratified_background(combined_inputs_tensor, basin_ids)
         explainer = shap.GradientExplainer(wrapped_model, background_tensor, batch_size=BATCH_SIZE)
 
         shap_values_batches = []
@@ -253,14 +273,14 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
             basin_shap = shap_values[indices]  # shape: [n_samples_basin, total_features]
             combined_samples = []
             for sample in basin_shap:
-                # Dynamic part: reshape and sum over time to aggregate to one value per dynamic feature.
+                # Dynamic part: reshape and sum over time to aggregate to one value per dynamic feature
                 dyn_part = sample[:self.seq_length * n_dynamic].reshape(self.seq_length, n_dynamic)
                 dyn_agg = dyn_part.sum(axis=0)  # shape: (n_dynamic,)
-                # Static part: slice out and squeeze to ensure 1D.
+                # Static part: slice out and squeeze to ensure 1D
                 stat_part = sample[self.seq_length * n_dynamic:]
                 if stat_part.ndim > 1:
                     stat_part = np.squeeze(stat_part, axis=-1)
-                # Concatenate dynamic and static parts.
+                # Concatenate dynamic and static parts
                 combined = np.concatenate([dyn_agg, stat_part])
                 combined_samples.append(combined)
             combined_samples = np.array(combined_samples)  # shape: [n_samples_basin, n_dynamic+n_static]
