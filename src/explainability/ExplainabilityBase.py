@@ -126,23 +126,23 @@ class ExplainabilityBase:
         sequences = tensor.unfold(0, self.seq_length, 1)
         return sequences
     
-    def _compute_sampling_targets(self, cached_data, num_samples):
+    def _compute_sampling_targets(self, basin_counts, num_samples):
         """
         Compute the number of samples to draw from each basin using a largest-remainder method
         
         Args:
-            cached_data (dict): Dictionary containing each basin's valid data and valid_count
+            basin_counts (dict): Dictionary mapping basin_id to the valid sample count (int)
             num_samples (int): The total number of samples desired
         
         Returns:
             dict: A dictionary mapping basin_id to the number of samples to draw
         """
-        total_valid_samples = sum(info["valid_count"] for info in cached_data.values())
+        total_valid_samples = sum(basin_counts.values())
         
         # Compute ideal counts for each basin
         ideal_counts = {
-            basin_id: num_samples * (info["valid_count"] / total_valid_samples)
-            for basin_id, info in cached_data.items()
+            basin_id: num_samples * (count / total_valid_samples)
+            for basin_id, count in basin_counts.items()
         }
         
         # Assign the floor of each ideal count
@@ -159,7 +159,8 @@ class ExplainabilityBase:
         for basin_id, _ in sorted(remainders.items(), key=lambda x: x[1], reverse=True):
             if deficit <= 0:
                 break
-            if floor_counts[basin_id] < cached_data[basin_id]["valid_count"]:
+            # Only add if it doesn't exceed the basin's available valid samples
+            if floor_counts[basin_id] < basin_counts[basin_id]:
                 floor_counts[basin_id] += 1
                 deficit -= 1
 
@@ -167,10 +168,12 @@ class ExplainabilityBase:
 
     def _random_sample_from_file(self):
         """
-        Efficiently sample data from the period-specific output .p file.
-        The file is expected at:
-            run_dir/<period>/model_epoch<XXX>/<period>_all_output.p
-
+        Efficiently sample data from the period-specific output .p file without caching all processed
+        data into memory at once. This is done in two passes:
+        1. First pass: iterate over basins to compute the valid sample count per basin
+        2. Second pass: re-process each basin and sample the desired number of examples based on 
+            per-basin targets computed using a largest-remainder method
+        
         Returns:
             (final_x_d, final_x_s) as np.ndarray:
                 - final_x_d: shape [num_samples, seq_length, n_dynamic_features]
@@ -189,9 +192,8 @@ class ExplainabilityBase:
         with open(file_path, "rb") as f:
             data = pickle.load(f)
 
-        # Cache processed data for each basin
-        cached_data = {}
-
+        # First Pass: Compute valid counts per basin
+        basin_counts = {}
         for basin_id, basin_data in data.items():
             x_d = torch.tensor(basin_data["x_d"], dtype=torch.float32)
             x_s = torch.tensor(basin_data["x_s"], dtype=torch.float32)
@@ -206,38 +208,44 @@ class ExplainabilityBase:
             if x_s.ndim == 2 and x_s.shape[0] == 1 and x_d.shape[0] > 1:
                 x_s = x_s.repeat(x_d.shape[0], 1)
 
-            # Pre-process the basin data to filter out samples with NaNs
-            x_d, x_s = self._preprocess_basin_data(x_d, x_s)
-            valid_count = x_d.shape[0]
+            # Preprocess to filter out samples with NaNs
+            x_d_np, x_s_np = self._preprocess_basin_data(x_d, x_s)
+            valid_count = x_d_np.shape[0]
 
             if valid_count > 0:
-                cached_data[basin_id] = {
-                    "x_d": x_d,
-                    "x_s": x_s,
-                    "valid_count": valid_count
-                }
+                basin_counts[basin_id] = valid_count
 
         # Compute per-basin sampling targets
-        basin_targets = self._compute_sampling_targets(cached_data, self.num_samples)
+        basin_targets = self._compute_sampling_targets(basin_counts, self.num_samples)
 
-        # Collect stratified samples from the cached data
+        # Second Pass: Re-process and sample each basin individually
         sampled_x_d, sampled_x_s = [], []
-        for basin_id, info in cached_data.items():
+        for basin_id, basin_data in data.items():
             target = basin_targets.get(basin_id, 0)
             if target <= 0:
                 continue
 
-            x_d = info["x_d"]
-            x_s = info["x_s"]
+            x_d = torch.tensor(basin_data["x_d"], dtype=torch.float32)
+            x_s = torch.tensor(basin_data["x_s"], dtype=torch.float32)
 
-            # If more valid samples exist than required, randomly sample indices
-            if len(x_d) > target:
-                indices = np.random.choice(len(x_d), size=target, replace=False)
-                x_d = x_d[indices]
-                x_s = x_s[indices]
+            if x_d.ndim == 2:
+                x_d = self.reconstruct_sliding_windows(x_d)
+                if x_d is None:
+                    continue
 
-            sampled_x_d.append(x_d)
-            sampled_x_s.append(x_s)
+            if x_s.ndim == 2 and x_s.shape[0] == 1 and x_d.shape[0] > 1:
+                x_s = x_s.repeat(x_d.shape[0], 1)
+
+            x_d_np, x_s_np = self._preprocess_basin_data(x_d, x_s)
+
+            # If more valid samples exist than required, randomly choose the target number
+            if len(x_d_np) > target:
+                indices = np.random.choice(len(x_d_np), size=target, replace=False)
+                x_d_np = x_d_np[indices]
+                x_s_np = x_s_np[indices]
+
+            sampled_x_d.append(x_d_np)
+            sampled_x_s.append(x_s_np)
 
         final_x_d = np.concatenate(sampled_x_d, axis=0)
         final_x_s = np.concatenate(sampled_x_s, axis=0)
