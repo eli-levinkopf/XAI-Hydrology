@@ -159,9 +159,8 @@ class ExplainabilityBase:
             x_s = torch.tensor(basin_data["x_s"], dtype=torch.float32)
 
             if x_d.ndim == 2:
-                x_d = self.reconstruct_sliding_windows(x_d, self.seq_length)
+                x_d = self.reconstruct_sliding_windows(x_d)
                 if x_d is None:
-                    logging.warning(f"Skipping basin {basin_id} due to not enough time steps.")
                     continue 
                 
             # If x_s was saved as a single row (shape [1, n_static_features]) but we now have multiple samples,
@@ -198,15 +197,16 @@ class ExplainabilityBase:
             x_d = torch.tensor(basin_data["x_d"], dtype=torch.float32)
             x_s = torch.tensor(basin_data["x_s"], dtype=torch.float32)
 
-            if x_s.ndim == 1:
-                x_s = x_s.unsqueeze(0)  # Now x_s shape becomes (1, n_static_features)
+            # If the dynamic inputs are in the new 2D format, reconstruct sliding windows
+            if x_d.ndim == 2:
+                x_d = self.reconstruct_sliding_windows(x_d)
+                if x_d is None:
+                    logging.warning(f"Skipping basin {basin_id} due to not enough time steps.")
+                    continue 
 
-            # If x_s has only one row but x_d has more than one sample, duplicate x_s.
-            if x_s.shape[0] == 1 and x_d.shape[0] > 1:
-                n_samples = x_d.shape[0]
-                x_s = x_s.repeat(n_samples, 1)
-            
-            # Preprocess the data (this removes any samples with NaNs, etc.)
+            if x_s.ndim == 2 and x_s.shape[0] == 1 and x_d.shape[0] > 1:
+                x_s = x_s.repeat(x_d.shape[0], 1)
+
             x_d, x_s = self._preprocess_basin_data(x_d, x_s)
 
             if len(x_d) > target:
