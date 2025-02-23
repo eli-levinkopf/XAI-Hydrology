@@ -86,14 +86,14 @@ class ExplainabilityBase:
 
     def _preprocess_basin_data(self, x_d, x_s):
         """
-        Preprocess a single basin's dynamic and static data by filtering out rows with NaNs.
+        Preprocess a single basin's dynamic and static data by filtering out rows with NaNs
         
         Args:
-            x_d (torch.Tensor): Dynamic features of shape [n_samples, seq_length, n_dynamic_features].
-            x_s (torch.Tensor): Static features of shape [n_samples, n_static_features].
+            x_d (torch.Tensor): Dynamic features of shape [n_samples, seq_length, n_dynamic_features]
+            x_s (torch.Tensor): Static features of shape [n_samples, n_static_features]
 
         Returns:
-            Tuple of np.ndarray (x_d, x_s) with only valid (non-NaN) samples.
+            Tuple of np.ndarray (x_d, x_s) with only valid (non-NaN) samples
         """
         nan_mask_dynamic = ~torch.isnan(x_d).any(dim=(1, 2))
         nan_mask_static = ~torch.isnan(x_s).any(dim=1)
@@ -123,7 +123,7 @@ class ExplainabilityBase:
         if T < self.seq_length:
             return None
         
-        sequences = tensor.unfold(0, self.seq_length, 1)
+        sequences = tensor.unfold(0, self.seq_length, 1).permute(0, 2, 1)
         return sequences
     
     def _compute_sampling_targets(self, basin_counts, num_samples):
@@ -194,7 +194,7 @@ class ExplainabilityBase:
 
         # First Pass: Compute valid counts per basin
         basin_counts = {}
-        for basin_id, basin_data in data.items():
+        for basin_id, basin_data in tqdm(data.items(), desc="Loading basins"):
             x_d = torch.tensor(basin_data["x_d"], dtype=torch.float32)
             x_s = torch.tensor(basin_data["x_s"], dtype=torch.float32)
 
@@ -220,7 +220,7 @@ class ExplainabilityBase:
 
         # Second Pass: Re-process and sample each basin individually
         sampled_x_d, sampled_x_s = [], []
-        for basin_id, basin_data in data.items():
+        for basin_id, basin_data in tqdm(data.items(), desc="Sampling basins"):
             target = basin_targets.get(basin_id, 0)
             if target <= 0:
                 continue
