@@ -5,6 +5,7 @@ import pickle
 import numpy as np
 from collections import defaultdict
 from tqdm import tqdm
+import logging
 
 from neuralhydrology.utils.config import Config
 from neuralhydrology.modelzoo.cudalstm import CudaLSTM
@@ -103,6 +104,28 @@ class ExplainabilityBase:
 
         return x_d.cpu().numpy(), x_s.cpu().numpy()
 
+    def reconstruct_sliding_windows(self, tensor: torch.Tensor) -> torch.Tensor: 
+        """ 
+        Given a 2D tensor with shape [T, n_features] (e.g. T days of data), 
+        reconstruct a 3D tensor of sliding-window sequences of length self.seq_length. 
+        Reconstruct sliding-window sequences: for each day i from seq_length-1 to T-1, 
+        the sequence is from day (i - seq_length + 1) to day i
+
+        Args:
+            tensor (torch.Tensor): A 2D tensor with shape [T, n_features], where T is the number of time steps
+
+        Returns:
+            torch.Tensor or None: A 3D tensor with shape [T - seq_length + 1, seq_length, n_features]
+            Returns None if there are not enough time steps to form a full sequence
+        """
+        T = tensor.shape[0]
+
+        if T < self.seq_length:
+            return None
+        
+        sequences = [tensor[i - self.seq_length + 1 : i + 1] for i in range(self.seq_length - 1, T)]
+        return torch.stack(sequences)
+
     def _random_sample_from_file(self):
         """
         Efficiently sample data from the period-specific output .p file without loading everything into memory.
@@ -134,16 +157,19 @@ class ExplainabilityBase:
         for basin_id, basin_data in data.items():
             x_d = torch.tensor(basin_data["x_d"], dtype=torch.float32)
             x_s = torch.tensor(basin_data["x_s"], dtype=torch.float32)
-            
-            if x_s.ndim == 1:
-                x_s = x_s.unsqueeze(0)  # Now x_s shape becomes (1, n_static_features)
 
-            # If x_s has only one row but x_d has more than one sample, duplicate x_s.
-            if x_s.shape[0] == 1 and x_d.shape[0] > 1:
-                n_samples = x_d.shape[0]
-                x_s = x_s.repeat(n_samples, 1)
+            if x_d.ndim == 2:
+                x_d = self.reconstruct_sliding_windows(x_d, self.seq_length)
+                if x_d is None:
+                    logging.warning(f"Skipping basin {basin_id} due to not enough time steps.")
+                    continue 
+                
+            # If x_s was saved as a single row (shape [1, n_static_features]) but we now have multiple samples,
+            # replicate x_s along the sample dimension
+            if x_s.ndim == 2 and x_s.shape[0] == 1 and x_d.shape[0] > 1:
+                x_s = x_s.repeat(x_d.shape[0], 1)
             
-            # Process the data (this function expects both to be 2D in the sample dimension)
+            # Process the data (e.g., filter out samples with NaNs)
             x_d, x_s = self._preprocess_basin_data(x_d, x_s)
             valid_count = x_d.shape[0]
             basin_sample_counts[basin_id] = valid_count
