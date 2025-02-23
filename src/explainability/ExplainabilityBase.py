@@ -123,12 +123,51 @@ class ExplainabilityBase:
         if T < self.seq_length:
             return None
         
-        sequences = [tensor[i - self.seq_length + 1 : i + 1] for i in range(self.seq_length - 1, T)]
-        return torch.stack(sequences)
+        sequences = tensor.unfold(0, self.seq_length, 1)
+        return sequences
+    
+    def _compute_sampling_targets(self, cached_data, num_samples):
+        """
+        Compute the number of samples to draw from each basin using a largest-remainder method
+        
+        Args:
+            cached_data (dict): Dictionary containing each basin's valid data and valid_count
+            num_samples (int): The total number of samples desired
+        
+        Returns:
+            dict: A dictionary mapping basin_id to the number of samples to draw
+        """
+        total_valid_samples = sum(info["valid_count"] for info in cached_data.values())
+        
+        # Compute ideal counts for each basin
+        ideal_counts = {
+            basin_id: num_samples * (info["valid_count"] / total_valid_samples)
+            for basin_id, info in cached_data.items()
+        }
+        
+        # Assign the floor of each ideal count
+        floor_counts = {basin_id: int(ideal) for basin_id, ideal in ideal_counts.items()}
+        total_assigned = sum(floor_counts.values())
+        deficit = num_samples - total_assigned
+
+        # Distribute remaining samples based on the fractional remainders
+        remainders = {
+            basin_id: ideal_counts[basin_id] - floor_counts[basin_id]
+            for basin_id in ideal_counts
+        }
+        
+        for basin_id, _ in sorted(remainders.items(), key=lambda x: x[1], reverse=True):
+            if deficit <= 0:
+                break
+            if floor_counts[basin_id] < cached_data[basin_id]["valid_count"]:
+                floor_counts[basin_id] += 1
+                deficit -= 1
+
+        return floor_counts
 
     def _random_sample_from_file(self):
         """
-        Efficiently sample data from the period-specific output .p file without loading everything into memory.
+        Efficiently sample data from the period-specific output .p file.
         The file is expected at:
             run_dir/<period>/model_epoch<XXX>/<period>_all_output.p
 
@@ -150,65 +189,48 @@ class ExplainabilityBase:
         with open(file_path, "rb") as f:
             data = pickle.load(f)
 
-        # First pass: count valid samples per basin
-        basin_sample_counts = defaultdict(int)
-        total_valid_samples = 0
+        # Cache processed data for each basin
+        cached_data = {}
 
         for basin_id, basin_data in data.items():
             x_d = torch.tensor(basin_data["x_d"], dtype=torch.float32)
             x_s = torch.tensor(basin_data["x_s"], dtype=torch.float32)
 
+            # If the dynamic data is 2D, reconstruct sliding windows
             if x_d.ndim == 2:
                 x_d = self.reconstruct_sliding_windows(x_d)
                 if x_d is None:
                     continue 
-                
-            # If x_s was saved as a single row (shape [1, n_static_features]) but we now have multiple samples,
-            # replicate x_s along the sample dimension
+
+            # If x_s is saved as a single row but x_d now has multiple samples, replicate x_s along the sample dimension
             if x_s.ndim == 2 and x_s.shape[0] == 1 and x_d.shape[0] > 1:
                 x_s = x_s.repeat(x_d.shape[0], 1)
-            
-            # Process the data (e.g., filter out samples with NaNs)
+
+            # Pre-process the basin data to filter out samples with NaNs
             x_d, x_s = self._preprocess_basin_data(x_d, x_s)
             valid_count = x_d.shape[0]
-            basin_sample_counts[basin_id] = valid_count
-            total_valid_samples += valid_count
 
-        # Calculate sampling probabilities per basin
-        sampling_probs = {
-            basin_id: count / total_valid_samples
-            for basin_id, count in basin_sample_counts.items()
-        }
+            if valid_count > 0:
+                cached_data[basin_id] = {
+                    "x_d": x_d,
+                    "x_s": x_s,
+                    "valid_count": valid_count
+                }
 
-        # Allocate samples per basin
-        basin_targets = {}
-        for basin_id, prob in sampling_probs.items():
-            count = basin_sample_counts[basin_id]
-            # Round to nearest int
-            basin_targets[basin_id] = min(int(self.num_samples * prob + 0.5), count)
+        # Compute per-basin sampling targets
+        basin_targets = self._compute_sampling_targets(cached_data, self.num_samples)
 
-        # Second pass: collect stratified samples
+        # Collect stratified samples from the cached data
         sampled_x_d, sampled_x_s = [], []
-        for basin_id, basin_data in tqdm(data.items(), desc="Sampling basins"):
-            target = basin_targets[basin_id]
-            if target == 0:
+        for basin_id, info in cached_data.items():
+            target = basin_targets.get(basin_id, 0)
+            if target <= 0:
                 continue
 
-            x_d = torch.tensor(basin_data["x_d"], dtype=torch.float32)
-            x_s = torch.tensor(basin_data["x_s"], dtype=torch.float32)
+            x_d = info["x_d"]
+            x_s = info["x_s"]
 
-            # If the dynamic inputs are in the new 2D format, reconstruct sliding windows
-            if x_d.ndim == 2:
-                x_d = self.reconstruct_sliding_windows(x_d)
-                if x_d is None:
-                    logging.warning(f"Skipping basin {basin_id} due to not enough time steps.")
-                    continue 
-
-            if x_s.ndim == 2 and x_s.shape[0] == 1 and x_d.shape[0] > 1:
-                x_s = x_s.repeat(x_d.shape[0], 1)
-
-            x_d, x_s = self._preprocess_basin_data(x_d, x_s)
-
+            # If more valid samples exist than required, randomly sample indices
             if len(x_d) > target:
                 indices = np.random.choice(len(x_d), size=target, replace=False)
                 x_d = x_d[indices]
