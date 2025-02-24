@@ -108,6 +108,7 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
         # Collect filtered samples per basin
         per_basin_x_d = {}
         per_basin_x_s = {}
+        basin_counts = {}
         for basin_id, basin_data in tqdm(data.items(), desc="Filtering basins"):
             x_d = torch.tensor(basin_data["x_d"], dtype=torch.float32)  # [n_seq, n_dynamic]
             x_s = torch.tensor(basin_data["x_s"], dtype=torch.float32)  # [1, n_static]
@@ -127,52 +128,50 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
             valid_y = (~torch.isnan(y).squeeze(1)).cpu().numpy()
             x_d = x_d[valid_y]
             x_s = x_s[valid_y]
-            y   = y[valid_y]
+            y = y[valid_y]
             mask = self.filter_fn(y)
             if torch.is_tensor(mask):
                 mask = mask.cpu().numpy()
             x_d = x_d[mask]
             x_s = x_s[mask]
-            y   = y[mask]
+            y = y[mask]
 
             if x_d.shape[0] > 0:
                 per_basin_x_d[basin_id] = x_d
                 per_basin_x_s[basin_id] = x_s
+                basin_counts[basin_id] = x_d.shape[0]
 
         if not per_basin_x_d:
             raise ValueError("No samples selected after applying the filter.")
 
-        # Determine the number of basins with available samples and compute target count per basin
-        basin_ids_list = list(per_basin_x_d.keys())
-        n_basins = len(basin_ids_list)
-        per_basin_target = self.num_samples // n_basins
-        logging.info(f"Sampling up to {per_basin_target} samples per basin from {n_basins} basins.")
+        # Compute per-basin sampling targets
+        basin_targets = self._compute_sampling_targets(basin_counts, self.num_samples)
+        
+        sampled_x_d, sampled_x_s, sampled_basin_ids = [], [], []
+        for basin_id, x_d in per_basin_x_d.items():
+            target = basin_targets.get(basin_id, 0)
+            x_s = per_basin_x_s[basin_id]
+            num_valid_samples = x_d.shape[0]
+            if num_valid_samples > target:
+                indices = np.random.choice(num_valid_samples, size=target, replace=False)
+                x_d = x_d[indices]
+                x_s = x_s[indices]
+            sampled_x_d.append(x_d)
+            sampled_x_s.append(x_s)
+            sampled_basin_ids.append(np.array([basin_id] * x_d.shape[0]))
 
-        equal_x_d_list, equal_x_s_list, equal_basin_ids_list = [], [], []
-        for basin_id in basin_ids_list:
-            basin_x_d = per_basin_x_d[basin_id]
-            basin_x_s = per_basin_x_s[basin_id]
-            n_basin = basin_x_d.shape[0]
-            if n_basin > per_basin_target:
-                chosen_indices = np.random.choice(n_basin, size=per_basin_target, replace=False)
-                basin_x_d = basin_x_d[chosen_indices]
-                basin_x_s = basin_x_s[chosen_indices]
-            equal_x_d_list.append(basin_x_d)
-            equal_x_s_list.append(basin_x_s)
-            equal_basin_ids_list.append(np.array([basin_id] * basin_x_d.shape[0]))
-
-        final_x_d = np.concatenate(equal_x_d_list, axis=0)
-        final_x_s = np.concatenate(equal_x_s_list, axis=0)
-        basin_ids_all = np.concatenate(equal_basin_ids_list, axis=0)
+        sampled_x_d = np.concatenate(sampled_x_d, axis=0)
+        sampled_x_s = np.concatenate(sampled_x_s, axis=0)
+        sampled_basin_ids = np.concatenate(sampled_basin_ids, axis=0)
 
         # Shuffle the combined data while keeping basin_ids aligned
-        indices = np.arange(len(final_x_d))
+        indices = np.arange(len(sampled_x_d))
         np.random.shuffle(indices)
-        final_x_d = final_x_d[indices]
-        final_x_s = final_x_s[indices]
-        basin_ids_all = basin_ids_all[indices]
+        sampled_x_d = sampled_x_d[indices]
+        sampled_x_s = sampled_x_s[indices]
+        sampled_basin_ids = sampled_basin_ids[indices]
 
-        return final_x_d, final_x_s, basin_ids_all
+        return sampled_x_d, sampled_x_s, sampled_basin_ids
 
     def _get_stratified_background(self, combined_inputs_tensor: Tensor, basin_ids: np.ndarray) -> Tensor:
         """
