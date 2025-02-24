@@ -14,7 +14,7 @@ from ShapAnalysis import SHAPAnalysis
 BACKGROUND_SIZE = 1024
 BATCH_SIZE = 256
 
-def extreme_filter_fn(y, percentile: float = 90):
+def extreme_filter_fn(y, percentile: float = 90) -> np.ndarray:
     """
     Select sequences where the target streamflow (from y) is above the given percentile.
     
@@ -27,10 +27,13 @@ def extreme_filter_fn(y, percentile: float = 90):
     """
     targets = y.squeeze(1)
     targets_np = targets.cpu().numpy() if torch.is_tensor(targets) else targets
+    # If there are no target values, return an empty mask
+    if targets_np.size == 0:
+        return np.array([], dtype=bool)
     threshold = np.percentile(targets_np, percentile)
     return targets >= threshold
 
-def median_filter_fn(y, lower_percentile: float = 45, upper_percentile: float = 55):
+def median_filter_fn(y, lower_percentile: float = 45, upper_percentile: float = 55) -> np.ndarray:
     """
     Select sequences where the target streamflow (from y) is between the lower and upper percentiles.
     
@@ -44,6 +47,9 @@ def median_filter_fn(y, lower_percentile: float = 45, upper_percentile: float = 
     """
     targets = y.squeeze(1)
     targets_np = targets.cpu().numpy() if torch.is_tensor(targets) else targets
+    # If there are no target values, return an empty mask
+    if targets_np.size == 0:
+        return np.array([], dtype=bool)
     lower = np.percentile(targets_np, lower_percentile)
     upper = np.percentile(targets_np, upper_percentile)
     return (targets >= lower) & (targets <= upper)
@@ -77,7 +83,7 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
         
         super().__init__(run_dir, epoch, num_samples, period=period, use_embedding=use_embedding)
 
-    def _random_sample_from_file(self):
+    def _random_sample_from_file(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Load each basin's data from the period-specific output file and apply the filter function on the target y.
         Records basin IDs for each selected sample. Then, sample an equal number of samples from each basin.
@@ -103,27 +109,38 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
         per_basin_x_d = {}
         per_basin_x_s = {}
         for basin_id, basin_data in tqdm(data.items(), desc="Filtering basins"):
-            x_d = torch.tensor(basin_data["x_d"], dtype=torch.float32)  # [n_seq, seq_length, n_dynamic]
+            x_d = torch.tensor(basin_data["x_d"], dtype=torch.float32)  # [n_seq, n_dynamic]
             x_s = torch.tensor(basin_data["x_s"], dtype=torch.float32)  # [1, n_static]
             y   = torch.tensor(basin_data["y"], dtype=torch.float32)    # [n_seq, 1]
-            if x_s.ndim == 1:
-                x_s = x_s.unsqueeze(0)
-            if x_s.shape[0] == 1 and x_d.shape[0] > 1:
-                x_s = x_s.repeat(x_d.shape[0], 1)
-            # Preprocess to remove rows with NaNs
+            
+            # If the dynamic data is 2D, reconstruct sliding windows
+            if x_d.ndim == 2:
+                x_d = self.reconstruct_sliding_windows(x_d)
+                if x_d is None:
+                    continue
+                # Since x_d was originally saved with T time steps, reconstruct y so 
+                # that each sliding window gets the target from its last day
+                y = y[self.seq_length - 1:]
+
+            # If x_s is saved as a single row but x_d now has multiple samples, replicate x_s along the sample dimension
+            if x_s.ndim == 2 and x_s.shape[0] == 1 and x_d.shape[0] > 1:
+                x_s = x_s.repeat(x_d.shape[0], 1) # TODO: move to _preprocess_basin_data
+            
+            # Preprocess to filter out samples with NaNs
             x_d, x_s = self._preprocess_basin_data(x_d, x_s)
-            # Compute valid_y mask from y and convert it to a NumPy array
+            
+            # Apply filtering based on y values
             valid_y = (~torch.isnan(y).squeeze(1)).cpu().numpy()
             x_d = x_d[valid_y]
             x_s = x_s[valid_y]
             y   = y[valid_y]
-            # Apply the filter function on y
             mask = self.filter_fn(y)
             if torch.is_tensor(mask):
                 mask = mask.cpu().numpy()
             x_d = x_d[mask]
             x_s = x_s[mask]
             y   = y[mask]
+
             if x_d.shape[0] > 0:
                 per_basin_x_d[basin_id] = x_d
                 per_basin_x_s[basin_id] = x_s
@@ -131,10 +148,9 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
         if not per_basin_x_d:
             raise ValueError("No samples selected after applying the filter.")
 
-        # Determine how many basins have samples
+        # Determine the number of basins with available samples and compute target count per basin
         basin_ids_list = list(per_basin_x_d.keys())
         n_basins = len(basin_ids_list)
-        # Compute per-basin target sample count
         per_basin_target = self.num_samples // n_basins
         logging.info(f"Sampling up to {per_basin_target} samples per basin from {n_basins} basins.")
 
@@ -147,7 +163,6 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
                 chosen_indices = np.random.choice(n_basin, size=per_basin_target, replace=False)
                 basin_x_d = basin_x_d[chosen_indices]
                 basin_x_s = basin_x_s[chosen_indices]
-            # Else, take all available samples
             equal_x_d_list.append(basin_x_d)
             equal_x_s_list.append(basin_x_s)
             equal_basin_ids_list.append(np.array([basin_id] * basin_x_d.shape[0]))
@@ -167,7 +182,8 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
 
     def _get_stratified_background(self, combined_inputs_tensor: torch.Tensor, basin_ids: np.ndarray) -> torch.Tensor:
         """
-        Create a stratified background tensor by ensuring that every basin is represented
+        Create a stratified background tensor ensuring every basin is represented, 
+        but then subsample so that the total number of background samples does not exceed BACKGROUND_SIZE
         
         Args:
             combined_inputs_tensor (torch.Tensor): Combined input tensor of shape [n_samples, total_features]
@@ -186,7 +202,13 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
                 background_indices.extend(basin_indices.tolist())
             else:
                 background_indices.extend(np.random.choice(basin_indices, size=k, replace=False).tolist())
+
         background_indices = np.array(background_indices)
+        
+        # If more background samples than desired, subsample to BACKGROUND_SIZE
+        if len(background_indices) > BACKGROUND_SIZE:
+            background_indices = np.random.choice(background_indices, size=BACKGROUND_SIZE, replace=False)
+        
         background_tensor = combined_inputs_tensor[background_indices].clone().detach().requires_grad_(True)
         return background_tensor
 
@@ -226,8 +248,10 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
                     batch_values = batch_values[0]
                 if torch.is_tensor(batch_values):
                     batch_values = batch_values.cpu().numpy()
+                
                 shap_values_batches.append(batch_values)
                 pbar.update(len(batch))
+
                 if i % (BATCH_SIZE * 10) == 0:
                     torch.cuda.empty_cache()
 
