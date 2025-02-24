@@ -140,9 +140,9 @@ class SHAPAnalysis(ExplainabilityBase):
           - Permute the result to get [seq_length, batch, (dyn_emb_dim + stat_emb_dim)].
         
         Returns:
-            torch.nn.Module: Wrapped model that takes an input of shape [batch, flattened_dim].
+            nn.Module: Wrapped model that takes an input of shape [batch, flattened_dim].
         """
-        class WrappedModelEmbedding(torch.nn.Module):
+        class WrappedModelEmbedding(nn.Module):
             def __init__(self, original_model: nn.Module, seq_length: int, num_dynamic: int, num_static: int) -> None:
                 super().__init__()
                 self.original_model = original_model
@@ -155,10 +155,10 @@ class SHAPAnalysis(ExplainabilityBase):
             def forward(self, embedding_input: Tensor) -> Tensor:
                 """
                 Args:
-                    embedding_input (torch.Tensor): Tensor of shape [batch, flattened_dim],
+                    embedding_input (Tensor): Tensor of shape [batch, flattened_dim],
                       where flattened_dim = (seq_length * dyn_emb_dim) + stat_emb_dim.
                 Returns:
-                    torch.Tensor: Final prediction of shape [batch, 1].
+                    Tensor: Final prediction of shape [batch, 1].
                 """
                 batch_size = embedding_input.size(0)
                 seq_length = self.seq_length
@@ -216,7 +216,7 @@ class SHAPAnalysis(ExplainabilityBase):
         self.model.to(device)
 
         # Sample dynamic and static inputs
-        final_x_d, final_x_s = self._random_sample_from_file()
+        final_x_d, final_x_s = self._randomly_sample_basin_data()
 
         if self.use_embedding:
             # Get the embedding outputs from embedding_net, then process to flatten.

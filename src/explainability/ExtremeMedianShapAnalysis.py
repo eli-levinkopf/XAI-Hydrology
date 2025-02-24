@@ -1,8 +1,8 @@
-from typing import Dict, Tuple, Optional, Union
+from typing import Dict, Tuple, Union
 import os
 import torch
+from torch import Tensor
 import numpy as np
-from collections import defaultdict
 from tqdm import tqdm
 import pickle
 import logging
@@ -83,7 +83,7 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
         
         super().__init__(run_dir, epoch, num_samples, period=period, use_embedding=use_embedding)
 
-    def _random_sample_from_file(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _randomly_sample_basin_data(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Load each basin's data from the period-specific output file and apply the filter function on the target y.
         Records basin IDs for each selected sample. Then, sample an equal number of samples from each basin.
@@ -112,20 +112,14 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
             x_d = torch.tensor(basin_data["x_d"], dtype=torch.float32)  # [n_seq, n_dynamic]
             x_s = torch.tensor(basin_data["x_s"], dtype=torch.float32)  # [1, n_static]
             y   = torch.tensor(basin_data["y"], dtype=torch.float32)    # [n_seq, 1]
-            
-            # If the dynamic data is 2D, reconstruct sliding windows
-            if x_d.ndim == 2:
-                x_d = self.reconstruct_sliding_windows(x_d)
-                if x_d is None:
-                    continue
-                # Since x_d was originally saved with T time steps, reconstruct y so 
-                # that each sliding window gets the target from its last day
-                y = y[self.seq_length - 1:]
 
-            # If x_s is saved as a single row but x_d now has multiple samples, replicate x_s along the sample dimension
-            if x_s.ndim == 2 and x_s.shape[0] == 1 and x_d.shape[0] > 1:
-                x_s = x_s.repeat(x_d.shape[0], 1) # TODO: move to _preprocess_basin_data
-            
+            x_d = self.reconstruct_sliding_windows(x_d)
+            if x_d is None:
+                continue
+            # Since x_d was originally saved with T time steps, reconstruct y so 
+            # that each sliding window gets the target from its last day
+            y = y[self.seq_length - 1:]
+        
             # Preprocess to filter out samples with NaNs
             x_d, x_s = self._preprocess_basin_data(x_d, x_s)
             
@@ -180,17 +174,17 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
 
         return final_x_d, final_x_s, basin_ids_all
 
-    def _get_stratified_background(self, combined_inputs_tensor: torch.Tensor, basin_ids: np.ndarray) -> torch.Tensor:
+    def _get_stratified_background(self, combined_inputs_tensor: Tensor, basin_ids: np.ndarray) -> Tensor:
         """
         Create a stratified background tensor ensuring every basin is represented, 
         but then subsample so that the total number of background samples does not exceed BACKGROUND_SIZE
         
         Args:
-            combined_inputs_tensor (torch.Tensor): Combined input tensor of shape [n_samples, total_features]
+            combined_inputs_tensor (Tensor): Combined input tensor of shape [n_samples, total_features]
             basin_ids (np.ndarray): Array of shape [n_samples] with basin IDs
         
         Returns:
-            torch.Tensor: A background tensor with gradients enabled
+            Tensor: A background tensor with gradients enabled
         """
         unique_basins = np.unique(basin_ids)
         # Determine k = number of samples to pick per basin; at least one sample per basin
@@ -224,7 +218,7 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
         """
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(device)
-        final_x_d, final_x_s, basin_ids = self._random_sample_from_file()
+        final_x_d, final_x_s, basin_ids = self._randomly_sample_basin_data()
         if self.use_embedding:
             shap_inputs_array = self._get_embedding_outputs(final_x_d, final_x_s)
             combined_inputs_tensor = torch.tensor(shap_inputs_array, dtype=torch.float32).to(device)

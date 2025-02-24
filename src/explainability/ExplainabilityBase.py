@@ -1,18 +1,20 @@
 import os
 import yaml
 import torch
+from torch import Tensor, nn
 import pickle
 import numpy as np
 from collections import defaultdict
 from tqdm import tqdm
 import logging
+from typing import Any
 
 from neuralhydrology.utils.config import Config
 from neuralhydrology.modelzoo.cudalstm import CudaLSTM
 
 
 class ExplainabilityBase:
-    def __init__(self, run_dir, epoch, num_samples, analysis_name, period="test"):
+    def __init__(self, run_dir: str, epoch: int, num_samples: int, analysis_name: str, period: str) -> None:
         """
         Base class for any explainability analysis on a NeuralHydrology model.
 
@@ -37,7 +39,7 @@ class ExplainabilityBase:
         self.model = self._load_model()
         self.results_folder = self._setup_results_folder()
 
-    def _load_config(self):
+    def _load_config(self) -> dict[str, Any]:
         """Load the 'config.yml' into a Python dict."""
         config_path = os.path.join(self.run_dir, 'config.yml')
         if not os.path.exists(config_path):
@@ -46,11 +48,11 @@ class ExplainabilityBase:
             cfg = yaml.safe_load(f)
         return cfg
 
-    def _load_model(self):
+    def _load_model(self) -> nn.Module:
         """
         Load the trained model checkpoint (epoch) specified in the constructor.
         Returns:
-            torch.nn.Module: The loaded model in eval mode on the appropriate device.
+            nn.Module: The loaded model in eval mode on the appropriate device.
         """
         config = Config(self.cfg)
         model_class_name = config.model.lower()
@@ -75,7 +77,7 @@ class ExplainabilityBase:
         model.eval()
         return model
 
-    def _setup_results_folder(self):
+    def _setup_results_folder(self) -> str:
         """
         Set up the folder structure for saving results under:
         run_dir/<period>/model_epoch<epoch>/<analysis_name>/
@@ -84,17 +86,22 @@ class ExplainabilityBase:
         os.makedirs(results_folder, exist_ok=True)
         return results_folder
 
-    def _preprocess_basin_data(self, x_d, x_s):
+    def _preprocess_basin_data(self, x_d: Tensor, x_s: Tensor) -> tuple[np.ndarray, np.ndarray]:
         """
-        Preprocess a single basin's dynamic and static data by filtering out rows with NaNs
+        Preprocess a single basin's dynamic and static data by aligning x_s and filtering out rows with NaNs
         
         Args:
-            x_d (torch.Tensor): Dynamic features of shape [n_samples, seq_length, n_dynamic_features]
-            x_s (torch.Tensor): Static features of shape [n_samples, n_static_features]
+            x_d (Tensor): Dynamic features of shape [n_samples, seq_length, n_dynamic_features]
+            x_s (Tensor): Static features of shape [n_samples, n_static_features] or [1, n_static_features]
 
         Returns:
             Tuple of np.ndarray (x_d, x_s) with only valid (non-NaN) samples
         """
+        
+        # Align static along the sample dimension features if they are a single row but x_d contains multiple samples
+        if x_s.ndim == 2 and x_s.shape[0] == 1 and x_d.shape[0] > 1:
+            x_s = x_s.repeat(x_d.shape[0], 1)
+        
         nan_mask_dynamic = ~torch.isnan(x_d).any(dim=(1, 2))
         nan_mask_static = ~torch.isnan(x_s).any(dim=1)
         valid_mask = nan_mask_dynamic & nan_mask_static
@@ -104,7 +111,7 @@ class ExplainabilityBase:
 
         return x_d.cpu().numpy(), x_s.cpu().numpy()
 
-    def reconstruct_sliding_windows(self, tensor: torch.Tensor) -> torch.Tensor: 
+    def reconstruct_sliding_windows(self, tensor: Tensor) -> Tensor: 
         """ 
         Given a 2D tensor with shape [T, n_features] (e.g. T days of data), 
         reconstruct a 3D tensor of sliding-window sequences of length self.seq_length. 
@@ -112,21 +119,21 @@ class ExplainabilityBase:
         the sequence is from day (i - seq_length + 1) to day i
 
         Args:
-            tensor (torch.Tensor): A 2D tensor with shape [T, n_features], where T is the number of time steps
+            tensor (Tensor): A 2D tensor with shape [T, n_features], where T is the number of time steps
 
         Returns:
-            torch.Tensor or None: A 3D tensor with shape [T - seq_length + 1, seq_length, n_features]
+            Tensor or None: A 3D tensor with shape [T - seq_length + 1, seq_length, n_features]
             Returns None if there are not enough time steps to form a full sequence
         """
         T = tensor.shape[0]
 
-        if T < self.seq_length:
+        if T < self.seq_length or tensor.ndim != 2:
             return None
         
         sequences = tensor.unfold(0, self.seq_length, 1).permute(0, 2, 1)
         return sequences
     
-    def _compute_sampling_targets(self, basin_counts, num_samples):
+    def _compute_sampling_targets(self, basin_counts: dict[int, int], num_samples: int) -> dict[int, int]:
         """
         Compute the number of samples to draw from each basin using a largest-remainder method
         
@@ -166,7 +173,7 @@ class ExplainabilityBase:
 
         return floor_counts
 
-    def _random_sample_from_file(self):
+    def _randomly_sample_basin_data(self) -> tuple[np.ndarray, np.ndarray]:
         """
         Efficiently sample data from the period-specific output .p file without caching all processed
         data into memory at once. This is done in two passes:
@@ -198,20 +205,14 @@ class ExplainabilityBase:
             x_d = torch.tensor(basin_data["x_d"], dtype=torch.float32)
             x_s = torch.tensor(basin_data["x_s"], dtype=torch.float32)
 
-            # If the dynamic data is 2D, reconstruct sliding windows
-            if x_d.ndim == 2:
-                x_d = self.reconstruct_sliding_windows(x_d)
-                if x_d is None:
-                    continue 
-
-            # If x_s is saved as a single row but x_d now has multiple samples, replicate x_s along the sample dimension
-            if x_s.ndim == 2 and x_s.shape[0] == 1 and x_d.shape[0] > 1:
-                x_s = x_s.repeat(x_d.shape[0], 1)
+            x_d = self.reconstruct_sliding_windows(x_d)
+            if x_d is None:
+                continue 
 
             # Preprocess to filter out samples with NaNs
-            x_d_np, x_s_np = self._preprocess_basin_data(x_d, x_s)
-            valid_count = x_d_np.shape[0]
-
+            x_d, x_s = self._preprocess_basin_data(x_d, x_s)
+            
+            valid_count = x_d.shape[0]
             if valid_count > 0:
                 basin_counts[basin_id] = valid_count
 
@@ -228,24 +229,20 @@ class ExplainabilityBase:
             x_d = torch.tensor(basin_data["x_d"], dtype=torch.float32)
             x_s = torch.tensor(basin_data["x_s"], dtype=torch.float32)
 
-            if x_d.ndim == 2:
-                x_d = self.reconstruct_sliding_windows(x_d)
-                if x_d is None:
-                    continue
+            x_d = self.reconstruct_sliding_windows(x_d)
+            if x_d is None:
+                continue
 
-            if x_s.ndim == 2 and x_s.shape[0] == 1 and x_d.shape[0] > 1:
-                x_s = x_s.repeat(x_d.shape[0], 1)
-
-            x_d_np, x_s_np = self._preprocess_basin_data(x_d, x_s)
+            x_d, x_s = self._preprocess_basin_data(x_d, x_s)
 
             # If more valid samples exist than required, randomly choose the target number
-            if len(x_d_np) > target:
-                indices = np.random.choice(len(x_d_np), size=target, replace=False)
-                x_d_np = x_d_np[indices]
-                x_s_np = x_s_np[indices]
+            if len(x_d) > target:
+                indices = np.random.choice(len(x_d), size=target, replace=False)
+                x_d = x_d[indices]
+                x_s = x_s[indices]
 
-            sampled_x_d.append(x_d_np)
-            sampled_x_s.append(x_s_np)
+            sampled_x_d.append(x_d)
+            sampled_x_s.append(x_s)
 
         final_x_d = np.concatenate(sampled_x_d, axis=0)
         final_x_s = np.concatenate(sampled_x_s, axis=0)
@@ -258,19 +255,19 @@ class ExplainabilityBase:
 
         return final_x_d, final_x_s
     
-    def _aggregate_static_features(self, values, x_s=None):
+    def _aggregate_static_features(self, values: np.ndarray, x_s: np.ndarray = None) -> tuple[np.ndarray, np.ndarray, list[str]]:
         """
         Aggregate static feature importance values (SHAP, IG, etc.)
 
         Args:
-            values (np.ndarray): Importance values to aggregate, shape [n_samples, n_features].
-            x_s (np.ndarray, optional): Corresponding input values, shape [n_samples, n_features].
+            values (np.ndarray): Importance values to aggregate, shape [n_samples, n_features]
+            x_s (np.ndarray, optional): Corresponding input values, shape [n_samples, n_features]
 
         Returns:
             tuple:
-                - np.ndarray: Aggregated values, shape [n_samples, n_aggregated_features].
-                - np.ndarray or None: Aggregated inputs if x_s is provided.
-                - list: Names of aggregated features.
+                - np.ndarray: Aggregated values, shape [n_samples, n_aggregated_features]
+                - np.ndarray or None: Aggregated inputs if x_s is provided
+                - list: Names of aggregated features
         """
         feature_groups = {
             'glc_pc': 'glc_pc_aggregated',
@@ -311,31 +308,30 @@ class ExplainabilityBase:
         combined_inputs = np.column_stack(aggregated_data['inputs']) if x_s is not None else None
 
         return (combined_values, combined_inputs, aggregated_data['names']) if x_s is not None else (
-            combined_values, aggregated_data['names']
-        )
+            combined_values, aggregated_data['names'])
 
-    def _wrap_model(self):
+    def _wrap_model(self) -> nn.Module:
         """
         Create a wrapper so we can pass a single input tensor of shape
-        [batch, seq_length * num_dynamic + num_static] directly to self.model.
+        [batch, seq_length * num_dynamic + num_static] directly to self.model
 
         Returns:
-            torch.nn.Module: A wrapped model that reshapes the inputs and calls the original model.
+            nn.Module: A wrapped model that reshapes the inputs and calls the original model
         """
-        class WrappedModel(torch.nn.Module):
-            def __init__(self, original_model, seq_length, num_dynamic, num_static):
+        class WrappedModel(nn.Module):
+            def __init__(self, original_model: nn.Module, seq_length: int, num_dynamic: int, num_static: int) -> None:
                 super().__init__()
                 self.original_model = original_model
                 self.seq_length = seq_length
                 self.num_dynamic = num_dynamic
                 self.num_static = num_static
 
-            def forward(self, inputs):
+            def forward(self, inputs: Tensor) -> Tensor:
                 """
                 Args:
-                    inputs (torch.Tensor): Shape [batch, seq_length*num_dynamic + num_static].
+                    inputs (Tensor): Shape [batch, seq_length*num_dynamic + num_static]
                 Returns:
-                    torch.Tensor: Model outputs, shape [batch, 1].
+                    Tensor: Model outputs, shape [batch, 1]
                 """
                 x_d_flat = inputs[:, : self.seq_length * self.num_dynamic]
                 x_s = inputs[:, self.seq_length * self.num_dynamic:]

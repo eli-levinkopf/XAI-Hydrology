@@ -1,6 +1,7 @@
 import os
 import argparse
 import torch
+from torch import Tensor, nn
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
@@ -17,7 +18,7 @@ IG_STEPS = 100
 
 
 class IntegratedGradientsAnalysis(ExplainabilityBase):
-    def __init__(self, run_dir, epoch, num_samples, period: str = "test"):
+    def __init__(self, run_dir: str, epoch: int, num_samples: int, period: str) -> None:
         """
         Initialize IntegratedGradientsAnalysis for a trained NeuralHydrology model.
         
@@ -31,18 +32,18 @@ class IntegratedGradientsAnalysis(ExplainabilityBase):
 
 
     @staticmethod
-    def integrated_gradients(model, baseline, inputs, steps=50):
+    def integrated_gradients(model: nn.Module, baseline: Tensor, inputs: Tensor, steps: int) -> Tensor:
         """
         Compute Integrated Gradients for a batch of inputs.
 
         Args:
-            model (torch.nn.Module): The wrapped model accepting shape [batch, num_features].
-            baseline (torch.Tensor): The baseline input of shape [1, num_features] or [batch, num_features].
-            inputs (torch.Tensor): The original inputs of shape [batch, num_features].
+            model (nn.Module): The wrapped model accepting shape [batch, num_features].
+            baseline (Tensor): The baseline input of shape [1, num_features] or [batch, num_features].
+            inputs (Tensor): The original inputs of shape [batch, num_features].
             steps (int): Number of interpolation steps.
 
         Returns:
-            torch.Tensor: Integrated gradients w.r.t. each input feature, shape [batch, num_features].
+            Tensor: Integrated gradients w.r.t. each input feature, shape [batch, num_features].
         """
         # 1) If there's a single baseline row but multiple inputs, repeat the baseline
         if baseline.shape[0] == 1 and inputs.shape[0] > 1:
@@ -78,7 +79,7 @@ class IntegratedGradientsAnalysis(ExplainabilityBase):
         
         return ig
 
-    def run_integrated_gradients(self):
+    def run_integrated_gradients(self) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         """
         Main method to compute and save IG values for the model.
         
@@ -89,7 +90,7 @@ class IntegratedGradientsAnalysis(ExplainabilityBase):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(device)
 
-        final_x_d, final_x_s = self._random_sample_from_file()
+        final_x_d, final_x_s = self._randomly_sample_basin_data()
         combined_inputs = np.hstack([
             final_x_d.reshape(len(final_x_d), -1),
             final_x_s
@@ -131,7 +132,7 @@ class IntegratedGradientsAnalysis(ExplainabilityBase):
         torch.cuda.empty_cache()
         return ig_values, {"x_d": final_x_d, "x_s": final_x_s}
 
-    def _sum_ig_dynamic_over_time(self, ig_dyn):
+    def _sum_ig_dynamic_over_time(self, ig_dyn: np.ndarray) -> np.ndarray:
         """
         Sum dynamic IG values across the time dimension.
         ig_dyn is shape [n_samples, seq_length * num_dynamic].
@@ -142,7 +143,8 @@ class IntegratedGradientsAnalysis(ExplainabilityBase):
         ig_dyn_reshaped = ig_dyn.reshape(n_samples, self.seq_length, num_dynamic)
         return ig_dyn_reshaped.sum(axis=1)  # sum over seq_length
 
-    def _plot_ig_bar(self, ig_values, feature_names, title="Overall Feature Contributions", use_abs=True, dynamic_count=0):
+    def _plot_ig_bar(self, ig_values: np.ndarray, feature_names: list, title: str, use_abs: bool, dynamic_count: int
+    ) -> None:
         """
         Plot a horizontal bar chart of average Integrated Gradients (IG) across samples.
 
@@ -188,7 +190,7 @@ class IntegratedGradientsAnalysis(ExplainabilityBase):
         plt.close()
         logging.info(f"IG Summary Bar Plot ({plot_suffix}) saved to {plot_path}")
 
-    def run_ig_visualizations(self, ig_values, inputs):
+    def run_ig_visualizations(self, ig_values: np.ndarray, inputs: dict[str, np.ndarray]) -> None:
         """
         Produce an overall bar chart of dynamic + static feature contributions.
         1) Separate dynamic vs. static
