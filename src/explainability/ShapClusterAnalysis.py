@@ -4,6 +4,7 @@ import numpy as np
 import argparse
 import logging
 import matplotlib.pyplot as plt
+import csv
 
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
@@ -51,9 +52,16 @@ class SHAPClusterAnalysis:
     def _setup_results_folder(self) -> str:
         """
         Set up the folder structure for saving results under:
-        run_dir/<period>/model_epoch<epoch>/<shap>/basins_clustered/<filter_type>
+        run_dir/<period>/model_epoch<epoch>/shap/basins_clustered/<filter_type>
         """
-        results_folder = os.path.join(self.run_dir, self.period, f"model_epoch{self.epoch:03d}", "shap", "basins_clustered", self.filter_type)
+        results_folder = os.path.join(
+            self.run_dir,
+            self.period,
+            f"model_epoch{self.epoch:03d}",
+            "shap",
+            "basins_clustered",
+            self.filter_type
+        )
         os.makedirs(results_folder, exist_ok=True)
         return results_folder
 
@@ -84,7 +92,6 @@ class SHAPClusterAnalysis:
         plot_path = os.path.join(self.results_folder, f"{self.n_clusters}_clusters_plot.png")
         plt.savefig(plot_path, dpi=300)
         plt.close()
-        logging.info(f"Cluster plot saved as: {plot_path}")
 
     def group_clusters(self):
         clusters_dict = {}
@@ -92,14 +99,80 @@ class SHAPClusterAnalysis:
             clusters_dict.setdefault(cluster, []).append(bid)
         return clusters_dict
 
+    def plot_cluster_bar(self, cluster, aggregated_profile):
+        plt.figure(figsize=(10, 8))
+        y = np.arange(len(aggregated_profile))
+        
+        plt.barh(y, aggregated_profile, align='center')
+        plt.yticks(y, self.feature_names, fontsize=6)
+        plt.gca().invert_yaxis()
+        plt.xlabel("Aggregated SHAP Value", fontsize=10)
+        plt.title(f"Cluster {cluster} Aggregated Feature Profile", fontsize=12)
+        plt.tight_layout()
+
+        file_path = os.path.join(self.results_folder, f"cluster_{cluster}_bar_plot.png")
+        plt.savefig(file_path, dpi=300)
+        plt.close()
+
+    def plot_cluster_radar(self, cluster, aggregated_profile):
+        num_vars = len(aggregated_profile)
+        # Compute angles for radar chart
+        angles = np.linspace(0, 2 * np.pi, num_vars, endpoint=False).tolist()
+        angles += angles[:1]  # complete the loop
+
+        values = aggregated_profile.tolist()
+        values += values[:1]
+
+        plt.figure(figsize=(8, 8))
+        ax = plt.subplot(111, polar=True)
+        plt.xticks(angles[:-1], self.feature_names, fontsize=6)
+        ax.plot(angles, values, color='b', linewidth=2)
+        ax.fill(angles, values, color='b', alpha=0.25)
+        plt.title(f"Cluster {cluster} Aggregated Feature Profile", y=1.08)
+        plt.tight_layout()
+        file_path = os.path.join(self.results_folder, f"cluster_{cluster}_radar_plot.png")
+        plt.savefig(file_path, dpi=300)
+        plt.close()
+
+    def save_combined_feature_profiles(self, cluster_profiles):
+        # Create a CSV with rows = features, columns = clusters
+        clusters_sorted = sorted(cluster_profiles.keys())
+        csv_file = os.path.join(self.results_folder, "cluster_feature_profiles.csv")
+        with open(csv_file, "w", newline="") as f:
+            writer = csv.writer(f)
+            header = ["Feature"] + [f"Cluster_{cluster}" for cluster in clusters_sorted]
+            writer.writerow(header)
+            num_features = len(self.feature_names)
+            for i in range(num_features):
+                row = [self.feature_names[i]]
+                for cluster in clusters_sorted:
+                    row.append(cluster_profiles[cluster][i])
+                writer.writerow(row)
+
+    def analyze_clusters(self):
+        logging.info("Analyzing clusters...")
+        self.plot_clusters()
+        clusters_dict = self.group_clusters()
+        # Dictionary to hold aggregated profiles per cluster
+        cluster_profiles = {}
+        for cluster, basin_ids in clusters_dict.items():
+            indices = [self.basin_ids.index(bid) for bid in basin_ids]
+            aggregated_profile = np.median(self.X[indices], axis=0)
+            cluster_profiles[cluster] = aggregated_profile
+            # Save bar and radar plots for each cluster
+            self.plot_cluster_bar(cluster, aggregated_profile)
+            self.plot_cluster_radar(cluster, aggregated_profile)
+        # Save a combined CSV for feature profiles across clusters
+        self.save_combined_feature_profiles(cluster_profiles)
+        logging.info(f"Cluster analysis completed. The results are saved in: {self.results_folder}")
+        return clusters_dict
+
     def run(self):
         self.load_data()
         self.normalize_data()
         self.reduce_dimension(n_components=2)
         self.perform_clustering()
-        self.plot_clusters()
-        clusters_dict = self.group_clusters()
-        return clusters_dict
+        self.analyze_clusters()
 
 
 def parse_args():
@@ -124,4 +197,4 @@ if __name__ == "__main__":
         filter_type=args.filter_type,
         n_clusters=args.n_clusters,
     )
-    clusters = shap_cluster_analysis.run()
+    shap_cluster_analysis.run()
