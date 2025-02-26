@@ -259,32 +259,31 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
         torch.cuda.empty_cache()
         return shap_values, {"x_d": final_x_d, "x_s": final_x_s}, basin_ids
 
-    def aggregate_shap_by_basin(self, shap_values: np.ndarray, basin_ids: np.ndarray, aggregation: str = "median") -> Dict[str, Union[Dict[str, np.ndarray], list]]:
+    def aggregate_shap_by_basin(self, shap_values: np.ndarray, basin_ids: np.ndarray) -> Dict[str, Union[Dict[str, np.ndarray], list]]:
         """
-        Aggregate SHAP values for each basin to produce one feature importance vector per basin.
+        Aggregate SHAP values for each basin to produce two feature importance vectors per basin:
+        one that is the median of the signed values and one that is the median of the absolute values.
         The input shap_values are assumed to be of shape [n_samples, total_features] where:
-          total_features = (seq_length * n_dynamic) + n_static.
+        total_features = (seq_length * n_dynamic) + n_static.
         For each sample, the dynamic part (first seq_length*n_dynamic features) is reshaped to [seq_length, n_dynamic]
         and then summed over time to produce a vector of shape [n_dynamic]. This is concatenated with the static part 
         (n_static features) to yield a combined vector of shape [n_dynamic+n_static].
-        Then, aggregation (median or mean) is computed over all samples for a basin.
+        Then the median is computed over all samples for a basin, and both the signed and absolute medians are saved.
         
-        Both the aggregated values and the feature names are saved together to disk.
-
         Args:
-            shap_values (np.ndarray): Array of shape [n_samples, total_features] with SHAP values
-            basin_ids (np.ndarray): Array of shape [n_samples] with basin IDs
-            aggregation (str): "median" (default) or "mean"
+            shap_values (np.ndarray): Array of shape [n_samples, total_features] with SHAP values.
+            basin_ids (np.ndarray): Array of shape [n_samples] with basin IDs.
             
         Returns:
             dict: A dictionary with two keys:
-                - "aggregated": mapping from basin_id to an aggregated importance vector of shape [n_dynamic+n_static]
+                - "aggregated": mapping from basin_id to a dict with keys "signed" and "absolute" each holding a
+                vector of shape [n_dynamic+n_static]
                 - "feature_names": list of feature names (length = n_dynamic+n_static)
         """
         n_dynamic = len(self.dynamic_features)
-
         unique_basins = np.unique(basin_ids)
         aggregated = {}
+        
         for basin in unique_basins:
             indices = np.where(basin_ids == basin)[0]
             basin_shap = shap_values[indices]  # shape: [n_samples_basin, total_features]
@@ -301,15 +300,10 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
                 combined = np.concatenate([dyn_agg, stat_part])
                 combined_samples.append(combined)
             combined_samples = np.array(combined_samples)  # shape: [n_samples_basin, n_dynamic+n_static]
-            if aggregation == "median":
-                aggregated_value = np.median(combined_samples, axis=0)
-            elif aggregation == "mean":
-                aggregated_value = np.mean(combined_samples, axis=0)
-            else:
-                raise ValueError("Invalid aggregation method. Choose 'median' or 'mean'.")
-            aggregated[basin] = aggregated_value
-
-        logging.info(f"Aggregated SHAP values shape (for one basin): {aggregated[unique_basins[0]].shape}")
+            # Compute median aggregation: both for signed and absolute values
+            signed_agg = np.median(combined_samples, axis=0)
+            absolute_agg = np.median(np.abs(combined_samples), axis=0)
+            aggregated[basin] = {"signed": signed_agg, "absolute": absolute_agg}
 
         out = {
             "aggregated": aggregated,
@@ -341,5 +335,20 @@ if __name__ == "__main__":
         filter_type=args.filter_type,
         use_embedding=args.use_embedding
     )
-    shap_values, inputs, basin_ids = analysis.run_shap()
-    aggregated_importance = analysis.aggregate_shap_by_basin(shap_values, basin_ids, aggregation="median")
+    
+    if args.reuse_shap:
+        fname_prefix = f"{'shap_values_embedding_' if args.use_embedding else 'shap_values_'}{args.filter_type}"
+        fname_prefix2 = f"{'inputs_embedding_' if args.use_embedding else 'inputs_'}{args.filter_type}"
+        shap_values_path = os.path.join(analysis.results_folder, f"{fname_prefix}.npy")
+        inputs_path = os.path.join(analysis.results_folder, f"{fname_prefix2}.npz")
+        if os.path.exists(shap_values_path) and os.path.exists(inputs_path):
+            logging.info("Reusing existing SHAP files. Loading from disk...")
+            shap_values = np.load(shap_values_path)
+            inputs_data = np.load(inputs_path)
+            basin_ids = inputs_data["basin_ids"]
+        else:
+            raise FileNotFoundError("Reuse flag set, but at least one of the SHAP files (values or inputs) is missing.")
+    else:
+        shap_values, inputs, basin_ids = analysis.run_shap()
+    
+    analysis.aggregate_shap_by_basin(shap_values, basin_ids)
