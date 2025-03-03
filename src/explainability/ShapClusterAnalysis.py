@@ -14,6 +14,7 @@ from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
 from sklearn.metrics import calinski_harabasz_score, davies_bouldin_score, silhouette_score
 
+# TODO: need to depricate this class. the functionality is now in ExtremeMedianClusterAnalysis
 
 class SHAPClusterAnalysis:
     """
@@ -460,7 +461,7 @@ class SHAPClusterAnalysis:
         self._normalize_data()
         
         if self.find_optimal_params:
-            # self.grid_search_best_parameters()
+            self.grid_search_best_parameters()
 
             # Find optimal dimensions first
             dim_results = self.find_optimal_dimensions()
