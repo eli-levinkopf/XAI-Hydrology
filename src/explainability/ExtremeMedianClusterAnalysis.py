@@ -15,6 +15,8 @@ from sklearn.cluster import KMeans
 from matplotlib.sankey import Sankey
 from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
 
+from utils.geoutils import plot_clusters_on_world_map
+
 class SHAPDataLoader:
     """
     Loads and preprocesses SHAP data from a pickle file.
@@ -325,6 +327,7 @@ class ExtremeMedianClusterAnalysis:
         self.common_basin_ids: List[str] = []
         self.feature_shift_df: Optional[pd.DataFrame] = None
         self.transition_matrix: Optional[np.ndarray] = None
+        self.gauge_mapping: Dict[str, Dict] = {}
         self.setup_output_folders()
 
     def setup_output_folders(self):
@@ -377,6 +380,28 @@ class ExtremeMedianClusterAnalysis:
         self.common_basin_ids = list(extreme_ids.intersection(median_ids))
         logging.info(f"Found {len(self.common_basin_ids)} common basins between extreme and median datasets")
 
+    def load_gauge_mapping(self, base_dir: str = "/sci/labs/efratmorin/lab_share/FloodsML/data/Caravan/attributes"):
+        """
+        Loads gauge latitude and longitude information from CSV files in the specified directory.
+        It reads the 'attributes_other_{source}.csv' file from each relevant subdirectory.
+
+        Args:
+            base_dir (str, optional): Base directory containing the attribute files. 
+                                      Defaults to "/sci/labs/efratmorin/lab_share/FloodsML/data/Caravan/attributes".
+        """
+        directories = ["camels", "camelsaus", "camelsbr", "camelscl", "camelsgb", "hysets", "lamah"]
+        mapping = {}
+        for d in directories:
+            file_path = os.path.join(base_dir, d, f"attributes_other_{d}.csv")
+            if os.path.exists(file_path):
+                df = pd.read_csv(file_path)
+                # Expecting columns 'gauge_id', 'gauge_lat', and 'gauge_lon'
+                for _, row in df.iterrows():
+                    mapping[row["gauge_id"]] = {"gauge_lat": row["gauge_lat"], "gauge_lon": row["gauge_lon"]}
+            else:
+                logging.warning(f"File {file_path} not found.")
+        self.gauge_mapping = mapping
+
     def setup_analyzers(self) -> None:
         """
         Initializes the ClusterAnalyzer for both extreme and median datasets and
@@ -405,6 +430,51 @@ class ExtremeMedianClusterAnalysis:
         extreme_clusters = {bid: cluster for bid, cluster in zip(self.common_basin_ids, self.extreme_analyzer.clusters)}
         median_clusters = {bid: cluster for bid, cluster in zip(self.common_basin_ids, self.median_analyzer.clusters)}
         return extreme_clusters, median_clusters
+    
+    def plot_geographic_clusters(self, clusters: Dict[str, int], condition: str) -> None:
+        """
+        Uses the helper function to plot geographic clusters based on gauge mapping.
+
+        Args:
+            clusters (Dict[str, int]): Mapping of basin ID to cluster label.
+            condition (str): Condition identifier ('extreme' or 'median').
+        """
+        plot_clusters_on_world_map(
+            basins=self.common_basin_ids,
+            cluster_dict=clusters,
+            gauge_mapping=self.gauge_mapping,
+            output_dir=self.extreme_folder if condition == "extreme" else self.median_folder
+        )
+
+    def cluster_size_distribution(self, extreme_clusters: Dict[str, int], median_clusters: Dict[str, int]) -> None:
+        """
+        Saves the cluster sizes for both extreme and median conditions to a CSV file.
+
+        Args:
+            extreme_clusters (Dict[str, int]): Mapping of basin ID to cluster for extreme condition.
+            median_clusters (Dict[str, int]): Mapping of basin ID to cluster for median condition.
+        """
+        extreme_counts = (
+            pd.Series(extreme_clusters)
+            .value_counts()
+            .sort_index()
+            .rename_axis('cluster')
+            .reset_index(name='count')
+        )
+        extreme_counts['condition'] = 'extreme'
+        
+        median_counts = (
+            pd.Series(median_clusters)
+            .value_counts()
+            .sort_index()
+            .rename_axis('cluster')
+            .reset_index(name='count')
+        )
+        median_counts['condition'] = 'median'
+        
+        cluster_sizes = pd.concat([extreme_counts, median_counts], ignore_index=True)
+        csv_path = os.path.join(self.results_folder, "cluster_sizes.csv")
+        cluster_sizes.to_csv(csv_path, index=False)
 
     def generate_cluster_visualizations(self, condition: str, analyzer: ClusterAnalyzer, loader: SHAPDataLoader, n_clusters: int) -> None:
         """
@@ -703,10 +773,14 @@ class ExtremeMedianClusterAnalysis:
         Runs the full extreme and median cluster analysis pipeline.
         """
         self.load_data()
+        self.load_gauge_mapping()
         self.setup_analyzers()
         extreme_clusters, median_clusters = self.run_clustering()
         self.generate_cluster_visualizations("extreme", self.extreme_analyzer, self.extreme_loader, self.extreme_n_clusters)
         self.generate_cluster_visualizations("median", self.median_analyzer, self.median_loader, self.median_n_clusters)
+        self.plot_geographic_clusters(extreme_clusters, "extreme")
+        self.plot_geographic_clusters(median_clusters, "median")
+        self.cluster_size_distribution(extreme_clusters, median_clusters)
         transition_matrix = self.create_transition_matrix(extreme_clusters, median_clusters)
         self.plot_transition_matrices(transition_matrix)
         self.plot_sankey_diagram(transition_matrix)
