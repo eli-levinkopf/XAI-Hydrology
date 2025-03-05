@@ -7,11 +7,12 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import argparse
+from sklearn.mixture import GaussianMixture
 from tqdm import tqdm
-from typing import Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Tuple, Optional
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
-from sklearn.cluster import KMeans
+from sklearn.cluster import AgglomerativeClustering, KMeans
 from matplotlib.sankey import Sankey
 from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
 
@@ -70,28 +71,37 @@ class SHAPDataLoader:
 class ClusterAnalyzer:
     """
     Performs clustering analysis on provided data.
-    Handles normalization, PCA-based dimensionality reduction, KMeans clustering,
-    and grid search for optimal PCA dimensions and cluster numbers.
+    Handles normalization, PCA-based dimensionality reduction, and clustering using various methods.
+    Available clustering methods:
+      - "KMeans" (default)
+      - "GMM" (Gaussian Mixture Models)
+      - "Agglomerative" (Hierarchical clustering)
+
+    The grid search function is supported for methods with a defined number of clusters.
     """
-    
+
     def __init__(self, 
                  X: np.ndarray, 
                  n_clusters: int, 
                  n_dim: int, 
+                 clustering_method: str, 
                  random_state: int = 42) -> None:
         """
         Initializes the ClusterAnalyzer.
 
         Args:
             X (np.ndarray): Data array to be analyzed.
-            n_clusters (int): Number of clusters for KMeans.
+            n_clusters (int): Default number of clusters (if applicable).
             n_dim (int): Number of PCA dimensions to reduce to.
+            clustering_method (str, optional): Clustering algorithm to use.
             random_state (int, optional): Seed for reproducibility. Defaults to 42.
         """
         self.X = X
         self.n_clusters = n_clusters
         self.n_dim = n_dim
         self.random_state = random_state
+        self.clustering_method = clustering_method.lower()
+
         self.scaler = StandardScaler()
         self.X_scaled: Optional[np.ndarray] = None
         self.pca: Optional[PCA] = None
@@ -99,9 +109,7 @@ class ClusterAnalyzer:
         self.clusters: Optional[np.ndarray] = None
 
     def normalize(self) -> None:
-        """
-        Normalizes the input data using StandardScaler.
-        """
+        """Normalizes the input data using StandardScaler."""
         self.X_scaled = self.scaler.fit_transform(self.X)
 
     def reduce_dimension(self, n_components: Optional[int] = None) -> np.ndarray:
@@ -113,10 +121,7 @@ class ClusterAnalyzer:
                 If None, uses the default self.n_dim. Defaults to None.
 
         Returns:
-            np.ndarray: The PCA-reduced data.
-        
-        Raises:
-            ValueError: If data has not been normalized.
+            np.ndarray: PCA-reduced data.
         """
         if self.X_scaled is None:
             raise ValueError("Data must be normalized before dimension reduction.")
@@ -127,31 +132,75 @@ class ClusterAnalyzer:
 
     def perform_clustering(self) -> None:
         """
-        Performs KMeans clustering on the PCA-reduced data.
-        If the data has not been reduced, it performs dimensionality reduction first.
+        Performs clustering on the PCA-reduced data using the specified clustering method.
+        If the data has not been reduced, it calls reduce_dimension() first.
         """
         if self.X_reduced is None:
             self.reduce_dimension()
-        kmeans = KMeans(n_clusters=self.n_clusters, n_init=100, max_iter=1000, random_state=self.random_state)
-        self.clusters = kmeans.fit_predict(self.X_reduced)
+
+        method = self.clustering_method.lower()
+        if method == "kmeans":
+            model = KMeans(
+                n_clusters=self.n_clusters,
+                n_init=100,
+                max_iter=1000,
+                random_state=self.random_state,
+            )
+            self.clusters = model.fit_predict(self.X_reduced)
+        elif method == "gmm":
+            model = GaussianMixture(
+                n_components=self.n_clusters,
+                random_state=self.random_state,
+            )
+            model.fit(self.X_reduced)
+            self.clusters = model.predict(self.X_reduced)
+        elif method in ["agglomerative", "hierarchical"]:
+            model = AgglomerativeClustering(
+                n_clusters=self.n_clusters,
+            )
+            self.clusters = model.fit_predict(self.X_reduced)
+        else:
+            raise ValueError(f"Unknown clustering method: {self.clustering_method}")
 
     def grid_search(self, components_range: np.ndarray, clusters_range: np.ndarray) -> pd.DataFrame:
         """
-        Performs grid search over PCA components and number of clusters.
+        Performs grid search over PCA components and number of clusters (if applicable).
 
         Args:
             components_range (np.ndarray): Array of PCA component numbers to test.
             clusters_range (np.ndarray): Array of cluster numbers to test.
 
         Returns:
-            pd.DataFrame: A DataFrame with silhouette, Calinski-Harabasz, and Davies-Bouldin scores.
+            pd.DataFrame: DataFrame with silhouette, Calinski-Harabasz, and Davies-Bouldin scores.
         """
         results = []
         for n_components in tqdm(components_range, desc="Grid Search PCA Components..."):
             X_red = self.reduce_dimension(n_components=n_components)
             for k in clusters_range:
-                kmeans = KMeans(n_clusters=k, n_init=100, max_iter=1000, random_state=self.random_state)
-                clusters = kmeans.fit_predict(X_red)
+                if self.clustering_method == "kmeans":
+                    model = KMeans(
+                        n_clusters=k,
+                        n_init=100,
+                        max_iter=1000,
+                        random_state=self.random_state,
+                    )
+                    clusters = model.fit_predict(X_red)
+                elif self.clustering_method == "gmm":
+                    model = GaussianMixture(
+                        n_components=k,
+                        max_iter=500,
+                        n_init=10,
+                        random_state=self.random_state,
+                    )
+                    model.fit(X_red)
+                    clusters = model.predict(X_red)
+                elif self.clustering_method in ["agglomerative", "hierarchical"]:
+                    model = AgglomerativeClustering(
+                        n_clusters=k,
+                    )
+                    clusters = model.fit_predict(X_red)
+                else:
+                    continue
                 silhouette_avg = silhouette_score(X_red, clusters)
                 calinski = calinski_harabasz_score(X_red, clusters)
                 davies = davies_bouldin_score(X_red, clusters)
@@ -164,7 +213,7 @@ class ClusterAnalyzer:
                 })
         return pd.DataFrame(results)
 
-    def find_optimal_dimensions(self, output_folder: str) -> Dict:
+    def find_optimal_dimensions(self, output_folder: str) -> Dict[str, Any]:
         """
         Finds the optimal number of PCA components based on cumulative explained variance.
 
@@ -172,30 +221,29 @@ class ClusterAnalyzer:
             output_folder (str): Folder path where the explained variance plot will be saved.
 
         Returns:
-            Dict: Dictionary with explained variance ratio, cumulative explained variance, 
-                  and number of components needed for 80%, 90%, and 95% thresholds.
+            Dict: Dictionary with explained variance metrics.
         """
+        if self.X_scaled is None:
+            raise ValueError("Data must be normalized before computing PCA optimal dimensions.")
         pca = PCA(n_components=min(self.X_scaled.shape[1], self.X_scaled.shape[0]))
         pca.fit(self.X_scaled)
 
         # Calculate cumulative explained variance
         cum_explained = np.cumsum(pca.explained_variance_ratio_)
         n_comp = {
-            'n_components_80': np.argmax(cum_explained >= 0.8) + 1,
-            'n_components_90': np.argmax(cum_explained >= 0.9) + 1,
-            'n_components_95': np.argmax(cum_explained >= 0.95) + 1
+            'n_components_80': int(np.argmax(cum_explained >= 0.8) + 1),
+            'n_components_90': int(np.argmax(cum_explained >= 0.9) + 1),
+            'n_components_95': int(np.argmax(cum_explained >= 0.95) + 1)
         }
 
         colors = {'80%': 'r', '90%': 'g', '95%': 'orange'}
 
-        # Save a plot for explained variance
         plt.figure(figsize=(10, 6))
         plt.plot(range(1, len(cum_explained)+1), cum_explained, 'bo-')
         plt.xlabel("Number of Principal Components")
         plt.ylabel("Cumulative Explained Variance")
         plt.title("PCA Explained Variance")
 
-        # Add horizontal and vertical lines with colors
         for thresh, label in zip([0.8, 0.9, 0.95], ["80%", "90%", "95%"]):
             plt.axhline(y=thresh, linestyle="--", color=colors[label], label=f"{label} Explained Variance")
             plt.axvline(x=n_comp[f'n_components_{label[:2]}'], linestyle="--", color=colors[label], alpha=0.3)
@@ -212,9 +260,9 @@ class ClusterAnalyzer:
             **n_comp
         }
 
-    def find_optimal_clusters(self, output_folder: str, n_components: int = 2, max_clusters: int = 10) -> Dict[str, List[float]]:
+    def find_optimal_clusters(self, output_folder: str, n_components: int = 2, max_clusters: int = 15) -> Dict[str, List[float]]:
         """
-        Determines the optimal number of clusters using various metrics.
+        Determines the optimal number of clusters using evaluation metrics for methods with a defined cluster count.
 
         Args:
             output_folder (str): Folder path where plots will be saved.
@@ -222,17 +270,12 @@ class ClusterAnalyzer:
             max_clusters (int, optional): Maximum number of clusters to test. Defaults to 10.
 
         Returns:
-            Dict[str, List[float]]: Dictionary containing:
-                - n_values: List of cluster numbers tested.
-                - inertia: Inertia values for each k.
-                - silhouette: Silhouette scores for each k.
-                - calinski_harabasz: Calinski-Harabasz scores for each k.
-                - davies_bouldin: Davies-Bouldin scores for each k.
+            Dict[str, List[float]]: Dictionary containing evaluation metrics.
         """
-        # Reduce the data to the specified number of components
+        if self.X_scaled is None:
+            raise ValueError("Data must be normalized before computing optimal clusters.")
         X_reduced = self.reduce_dimension(n_components=n_components)
-        
-        # Prepare a results dictionary
+
         results = {
             'n_values': list(range(2, max_clusters + 1)),
             'inertia': [],
@@ -240,13 +283,24 @@ class ClusterAnalyzer:
             'calinski_harabasz': [],
             'davies_bouldin': []
         }
-        
-        # Evaluate clustering performance for different k values
+
         for k in results['n_values']:
-            kmeans = KMeans(n_clusters=k, n_init=100, max_iter=1000, random_state=self.random_state)
-            clusters = kmeans.fit_predict(X_reduced)
-            
-            results['inertia'].append(kmeans.inertia_)
+            if self.clustering_method == "kmeans":
+                model = KMeans(n_clusters=k, n_init=100, max_iter=1000, random_state=self.random_state)
+                clusters = model.fit_predict(X_reduced)
+                inertia = model.inertia_
+            elif self.clustering_method == "gmm":
+                model = GaussianMixture(n_components=k, random_state=self.random_state)
+                model.fit(X_reduced)
+                clusters = model.predict(X_reduced)
+                inertia = np.nan  # Inertia is not defined for GMM
+            elif self.clustering_method in ["agglomerative", "hierarchical"]:
+                model = AgglomerativeClustering(n_clusters=k)
+                clusters = model.fit_predict(X_reduced)
+                inertia = np.nan  # Inertia is not defined for hierarchical clustering
+            else:
+                raise ValueError(f"Optimal clusters search not supported for method {self.clustering_method}")
+            results['inertia'].append(inertia)
             results['silhouette'].append(silhouette_score(X_reduced, clusters))
             results['calinski_harabasz'].append(calinski_harabasz_score(X_reduced, clusters))
             results['davies_bouldin'].append(davies_bouldin_score(X_reduced, clusters))
@@ -296,6 +350,7 @@ class ExtremeMedianClusterAnalysis:
                  median_n_clusters: int,
                  extreme_n_dim: int,
                  median_n_dim: int,
+                 clustering_method: str,
                  random_state: int = 42) -> None:
         """
         Initializes the ExtremeMedianClusterAnalysis.
@@ -317,6 +372,7 @@ class ExtremeMedianClusterAnalysis:
         self.median_n_clusters = median_n_clusters
         self.extreme_n_dim = extreme_n_dim
         self.median_n_dim = median_n_dim
+        self.clustering_method = clustering_method.lower()
         self.random_state = random_state
         # Data loaders and analyzers for extreme and median conditions
         self.extreme_loader: Optional[SHAPDataLoader] = None
@@ -334,34 +390,19 @@ class ExtremeMedianClusterAnalysis:
         """
         Sets up the output folders for saving analysis results and plots.
         """
-        # Comparative outputs folder
-        self.results_folder = os.path.join(
+        base_results_folder = os.path.join(
             self.run_dir, 
             self.period, 
             f"model_epoch{self.epoch:03d}", 
             "shap", 
             "basins_clustered", 
-            "cluster_analysis"
-        )
+            self.clustering_method
+            )
+        self.results_folder = os.path.join(base_results_folder, "cluster_analysis")
+        self.extreme_folder = os.path.join(base_results_folder, "extreme")
+        self.median_folder = os.path.join(base_results_folder, "median")
         os.makedirs(self.results_folder, exist_ok=True)
-        # Filter-specific folders for extreme and median
-        self.extreme_folder = os.path.join(
-            self.run_dir, 
-            self.period, 
-            f"model_epoch{self.epoch:03d}", 
-            "shap", 
-            "basins_clustered", 
-            "extreme"
-        )
         os.makedirs(self.extreme_folder, exist_ok=True)
-        self.median_folder = os.path.join(
-            self.run_dir, 
-            self.period, 
-            f"model_epoch{self.epoch:03d}", 
-            "shap", 
-            "basins_clustered", 
-            "median"
-        )
         os.makedirs(self.median_folder, exist_ok=True)
 
     def load_data(self) -> None:
@@ -409,8 +450,10 @@ class ExtremeMedianClusterAnalysis:
         """
         extreme_data = np.array([self.extreme_loader.aggregated[bid]["signed"] for bid in self.common_basin_ids])
         median_data = np.array([self.median_loader.aggregated[bid]["signed"] for bid in self.common_basin_ids])
-        self.extreme_analyzer = ClusterAnalyzer(extreme_data, self.extreme_n_clusters, self.extreme_n_dim, self.random_state)
-        self.median_analyzer = ClusterAnalyzer(median_data, self.median_n_clusters, self.median_n_dim, self.random_state)
+        self.extreme_analyzer = ClusterAnalyzer(extreme_data, self.extreme_n_clusters, self.extreme_n_dim, 
+                                                clustering_method=self.clustering_method, random_state=self.random_state)
+        self.median_analyzer = ClusterAnalyzer(median_data, self.median_n_clusters, self.median_n_dim, 
+                                               clustering_method=self.clustering_method, random_state=self.random_state)
         self.extreme_analyzer.normalize()
         self.median_analyzer.normalize()
         self.extreme_analyzer.reduce_dimension()
@@ -800,6 +843,7 @@ class OptimalParameterSearch:
                  run_dir: str, 
                  epoch: int, 
                  period: str, 
+                 clustering_method: str,
                  filter_type: str,
                  random_state: int = 42, 
                  components_range: Tuple[int, int] = (2, 66),
@@ -820,6 +864,7 @@ class OptimalParameterSearch:
         self.epoch = epoch
         self.period = period
         self.filter_type = filter_type.lower()
+        self.clustering_method = clustering_method.lower()
         self.random_state = random_state
         self.components_range = np.arange(*components_range)
         self.clusters_range = np.arange(*clusters_range)
@@ -828,7 +873,8 @@ class OptimalParameterSearch:
             self.period, 
             f"model_epoch{self.epoch:03d}", 
             "shap", 
-            "basins_clustered", 
+            "basins_clustered",
+            self.clustering_method,
             self.filter_type
         )
         os.makedirs(self.results_folder, exist_ok=True)
@@ -851,9 +897,6 @@ class OptimalParameterSearch:
         Runs a grid search over PCA components and number of clusters.
         Saves the grid search results as a CSV file and a heatmap plot.
         """
-        X_signed, _, _, _ = self.data_loader.get_data()
-        self.cluster_analyzer = ClusterAnalyzer(X_signed, n_clusters=3, n_dim=3, random_state=self.random_state)
-        self.cluster_analyzer.normalize()
         grid_results = self.cluster_analyzer.grid_search(self.components_range, self.clusters_range)
         csv_path = os.path.join(self.results_folder, "grid_search_results.csv")
         grid_results.to_csv(csv_path, index=False)
@@ -874,13 +917,15 @@ class OptimalParameterSearch:
         Runs the complete optimal parameter analysis pipeline.
         """
         self.load_data()
+        X_signed, _, _, _ = self.data_loader.get_data()
+        self.cluster_analyzer = ClusterAnalyzer(X_signed, n_clusters=3, n_dim=3, clustering_method=self.clustering_method, random_state=self.random_state)
+        self.cluster_analyzer.normalize()
         # Run grid search first
-        self.run_grid_search()
+        # self.run_grid_search()
         # Run optimal dimensions analysis
-        # self.cluster_analyzer.normalize()
-        # dim_results = self.cluster_analyzer.find_optimal_dimensions(self.results_folder)
+        dim_results = self.cluster_analyzer.find_optimal_dimensions(self.results_folder)
         # optimal_components = dim_results['n_components_90']
-        # self.cluster_analyzer.find_optimal_clusters(self.results_folder, n_components=optimal_components)
+        # self.cluster_analyzer.find_optimal_clusters(self.results_folder, n_components=6)
 
 def parse_args():
     """
@@ -899,6 +944,7 @@ def parse_args():
     parent_parser.add_argument("--run_dir", type=str, required=True, help="Path to the run directory.")
     parent_parser.add_argument("--epoch", type=int, required=True, help="Epoch number to load the model from.")
     parent_parser.add_argument("--period", type=str, default="test", help="Period (train, validation, or test).")
+    parent_parser.add_argument("--cluster_method", type=str, default="KMeans", choices=["KMeans", "GMM", "Agglomerative"], help="Clustering method.")
     parent_parser.add_argument("--log_level", type=str, default="INFO", help="Logging level (DEBUG, INFO, etc.).")
     
     subparsers = parser.add_subparsers(dest="command", help="Sub-commands: comparative, optimal")
@@ -906,9 +952,9 @@ def parse_args():
     # Comparative analysis subcommand
     parser_comp = subparsers.add_parser("comparative", parents=[parent_parser],
                                           help="Run clustering on both extreme and median data with provided parameters")
-    parser_comp.add_argument("--extreme_n_clusters", type=int, default=6, help="Number of clusters for extreme conditions.")
+    parser_comp.add_argument("--extreme_n_clusters", type=int, default=5, help="Number of clusters for extreme conditions.")
     parser_comp.add_argument("--median_n_clusters", type=int, default=4, help="Number of clusters for median conditions.")
-    parser_comp.add_argument("--extreme_n_dim", type=int, default=6, help="Number of PCA dimensions for extreme conditions.")
+    parser_comp.add_argument("--extreme_n_dim", type=int, default=4, help="Number of PCA dimensions for extreme conditions.")
     parser_comp.add_argument("--median_n_dim", type=int, default=4, help="Number of PCA dimensions for median conditions.")
     
     # Optimal parameter search subcommand
@@ -932,7 +978,8 @@ if __name__ == "__main__":
             extreme_n_clusters=args.extreme_n_clusters,
             median_n_clusters=args.median_n_clusters,
             extreme_n_dim=args.extreme_n_dim,
-            median_n_dim=args.median_n_dim
+            median_n_dim=args.median_n_dim,
+            clustering_method=args.cluster_method
         )
         analysis.run()
     
@@ -941,6 +988,7 @@ if __name__ == "__main__":
             run_dir=args.run_dir,
             epoch=args.epoch,
             period=args.period,
+            clustering_method=args.cluster_method,
             filter_type=args.filter_type,
             components_range=tuple(args.pca_range),
             clusters_range=tuple(args.clusters_range)
