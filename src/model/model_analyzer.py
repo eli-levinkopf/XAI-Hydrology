@@ -64,20 +64,25 @@ class ModelAnalyzer(BaseModelLoader):
 
         return torch.cat(all_hidden_states)
 
-    def get_inputs(self) -> Dict[str, np.ndarray]:
+    def get_inputs(self, fetch_target: bool = False) -> Dict[str, np.ndarray]:
         """
         Extract and combine the dynamic and static input features from the dataset.
+        Optionally also returns the target variable 'y' extracted from the last time step.
         
+        Args:
+            fetch_target (bool, optional): Whether to include the target variable 'y'. Defaults to False.
+
         Returns:
             dict: {
                 "x_d": np.ndarray of shape [num_samples, T, D],
-                "x_s": np.ndarray of shape [num_samples, S]
+                "x_s": np.ndarray of shape [num_samples, S],
+                "y": np.ndarray of shape [num_samples, 1]  (only if fetch_target is True)
             }
             where:
-                - num_samples is the total number of samples
-                - T is the number of timesteps (sequence length)
-                - D is the number of dynamic features
-                - S is the number of static features 
+                - num_samples is the total number of samples,
+                - T is the number of timesteps (sequence length),
+                - D is the number of dynamic features,
+                - S is the number of static features,
         """
         self.get_dataset()
         self.model.eval()
@@ -88,22 +93,37 @@ class ModelAnalyzer(BaseModelLoader):
         _, T, D = batch_x_d.shape
         _, S = batch_x_s.shape
 
+        if fetch_target:
+            batch_y = first_batch['y'].detach().cpu().numpy()  # shape: [batch, T, 1]
+            # Extract target from the last time step, resulting in shape [batch, 1]
+            batch_y_last = batch_y[:, -1, :]
+            _, Y = batch_y_last.shape  # Y should be 1
+
         # Determine total number of samples
         num_samples = len(self.dataset)
         
         # Pre-allocate the output arrays
         x_d_full = np.empty((num_samples, T, D), dtype=batch_x_d.dtype)
         x_s_full = np.empty((num_samples, S), dtype=batch_x_s.dtype)
-
+        if fetch_target:
+            y_full = np.empty((num_samples, 1), dtype=batch_y_last.dtype)
+        
         start_idx = 0
         with torch.no_grad():
             for batch_data in tqdm(self.dataloader, desc="Extracting inputs"):
-                batch_x_d = batch_data['x_d'].detach().cpu().numpy()  # shape: [batch, T, D]
-                batch_x_s = batch_data['x_s'].detach().cpu().numpy()  # shape: [batch, S]
+                batch_x_d = batch_data['x_d'].detach().cpu().numpy()  # [batch, T, D]
+                batch_x_s = batch_data['x_s'].detach().cpu().numpy()  # [batch, S]
                 batch_size = batch_x_d.shape[0]
                 
                 x_d_full[start_idx:start_idx + batch_size] = batch_x_d
                 x_s_full[start_idx:start_idx + batch_size] = batch_x_s
+                
+                if fetch_target:
+                    batch_y = batch_data['y'].detach().cpu().numpy()  # [batch, T, 1]
+                    # Take the last time step (target), which gives shape [batch, 1]
+                    batch_y_last = batch_y[:, -1, :]
+                    y_full[start_idx:start_idx + batch_size] = batch_y_last
+                    
                 start_idx += batch_size
 
         # Clean up
@@ -111,5 +131,12 @@ class ModelAnalyzer(BaseModelLoader):
         torch.cuda.empty_cache()
 
         inputs = {"x_d": x_d_full, "x_s": x_s_full}
-        logging.info(f"Extracted inputs: x_d shape {x_d_full.shape}, x_s shape {x_s_full.shape}")
+        if fetch_target:
+            inputs["y"] = y_full
+
+        logging.info(
+            f"Extracted inputs: x_d shape {x_d_full.shape}, x_s shape {x_s_full.shape}" +
+            (f", y shape {y_full.shape}" if fetch_target else "")
+        )
         return inputs
+    

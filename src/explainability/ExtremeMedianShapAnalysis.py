@@ -85,92 +85,65 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
 
     def _randomly_sample_basin_data(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
-        Load each basin's data from the period-specific output file and apply the filter function on the target y.
-        Records basin IDs for each selected sample. Then, sample an equal number of samples from each basin.
+        Use ModelAnalyzer's get_inputs to obtain all samples, then use the dataset's lookup table to obtain basin IDs. 
+        Apply filtering based on the target (last time step) and subsample an equal number of samples per basin.
         
         Returns:
-            final_x_d (np.ndarray): Dynamic features of shape [n_filtered_samples, seq_length, n_dynamic]
-            final_x_s (np.ndarray): Static features of shape [n_filtered_samples, n_static]
-            basin_ids_all (np.ndarray): 1D array of basin IDs corresponding to each sample
+            sampled_x_d (np.ndarray): Dynamic features of shape [n_filtered_samples, seq_length, n_dynamic]
+            sampled_x_s (np.ndarray): Static features of shape [n_filtered_samples, n_static]
+            sampled_ids (np.ndarray): 1D array of basin IDs corresponding to each sample
         """
-        file_path = os.path.join(
-            self.run_dir,
-            self.period,
-            f"model_epoch{self.epoch:03d}",
-            f"{self.period}_all_output.p"
-        )
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"Output file not found at {file_path}")
-
-        with open(file_path, "rb") as f:
-            data = pickle.load(f)
-
-        # Collect filtered samples per basin
-        per_basin_x_d = {}
-        per_basin_x_s = {}
-        basin_counts = {}
-        for basin_id, basin_data in tqdm(data.items(), desc="Filtering basins"):
-            x_d = torch.tensor(basin_data["x_d"], dtype=torch.float32)  # [n_seq, n_dynamic]
-            x_s = torch.tensor(basin_data["x_s"], dtype=torch.float32)  # [1, n_static]
-            y   = torch.tensor(basin_data["y"], dtype=torch.float32)    # [n_seq, 1]
-
-            x_d = self.reconstruct_sliding_windows(x_d)
-            if x_d is None:
-                continue
-            # Since x_d was originally saved with T time steps, reconstruct y so 
-            # that each sliding window gets the target from its last day
-            y = y[self.seq_length - 1:]
+        inputs = self.model_analyzer.get_inputs(fetch_target=True)
+        x_d, x_s, y = inputs["x_d"], inputs["x_s"], inputs["y"]
         
-            # Preprocess to filter out samples with NaNs
-            x_d, x_s = self._preprocess_basin_data(x_d, x_s)
-            
-            # Apply filtering based on y values
-            valid_y = (~torch.isnan(y).squeeze(1)).cpu().numpy()
-            x_d = x_d[valid_y]
-            x_s = x_s[valid_y]
-            y = y[valid_y]
-            mask = self.filter_fn(y)
-            if torch.is_tensor(mask):
-                mask = mask.cpu().numpy()
-            x_d = x_d[mask]
-            x_s = x_s[mask]
-            y = y[mask]
-
-            if x_d.shape[0] > 0:
-                per_basin_x_d[basin_id] = x_d
-                per_basin_x_s[basin_id] = x_s
-                basin_counts[basin_id] = x_d.shape[0]
-
-        if not per_basin_x_d:
-            raise ValueError("No samples selected after applying the filter.")
-
+        # Retrieve basin IDs from the dataset's lookup table
+        # The lookup table maps each sample index to a tuple: (basin_id, [indices])
+        lookup_table = self.model_analyzer.dataset.lookup_table
+        basin_ids = np.array([lookup_table[i][0] for i in range(len(lookup_table))])
+        
+        # Remove samples with NaN targets (y has shape [num_samples, 1])
+        valid_mask = ~np.isnan(y.squeeze(1))
+        x_d = x_d[valid_mask]
+        x_s = x_s[valid_mask]
+        y   = y[valid_mask]
+        basin_ids = basin_ids[valid_mask]
+        
+        # Apply filtering based on y values
+        mask = self.filter_fn(torch.tensor(y, dtype=torch.float32))
+        if torch.is_tensor(mask):
+            mask = mask.cpu().numpy()
+        x_d_filtered = x_d[mask]
+        x_s_filtered = x_s[mask]
+        basin_ids_filtered = basin_ids[mask]
+        
         # Compute per-basin sampling targets
+        unique_basins, counts = np.unique(basin_ids_filtered, return_counts=True)
+        basin_counts = dict(zip(unique_basins, counts))
         basin_targets = self._compute_sampling_targets(basin_counts, self.num_samples)
         
+        # Subsample an equal number of samples per basin
         sampled_x_d, sampled_x_s, sampled_basin_ids = [], [], []
-        for basin_id, x_d in per_basin_x_d.items():
-            target = basin_targets.get(basin_id, 0)
-            x_s = per_basin_x_s[basin_id]
-            num_valid_samples = x_d.shape[0]
-            if num_valid_samples > target:
-                indices = np.random.choice(num_valid_samples, size=target, replace=False)
-                x_d = x_d[indices]
-                x_s = x_s[indices]
-            sampled_x_d.append(x_d)
-            sampled_x_s.append(x_s)
-            sampled_basin_ids.append(np.array([basin_id] * x_d.shape[0]))
-
+        for basin in unique_basins:
+            indices = np.where(basin_ids_filtered == basin)[0]
+            target = basin_targets.get(basin, 0)
+            if len(indices) > target:
+                indices = np.random.choice(indices, size=target, replace=False)
+            sampled_x_d.append(x_d_filtered[indices])
+            sampled_x_s.append(x_s_filtered[indices])
+            sampled_basin_ids.append(np.array([basin] * len(indices)))
+        
         sampled_x_d = np.concatenate(sampled_x_d, axis=0)
         sampled_x_s = np.concatenate(sampled_x_s, axis=0)
         sampled_basin_ids = np.concatenate(sampled_basin_ids, axis=0)
+        
+        # Shuffle the final sampled data while keeping basin IDs aligned
+        perm = np.random.permutation(len(sampled_x_d))
+        sampled_x_d = sampled_x_d[perm]
+        sampled_x_s = sampled_x_s[perm]
+        sampled_basin_ids = sampled_basin_ids[perm]
 
-        # Shuffle the combined data while keeping basin_ids aligned
-        indices = np.arange(len(sampled_x_d))
-        np.random.shuffle(indices)
-        sampled_x_d = sampled_x_d[indices]
-        sampled_x_s = sampled_x_s[indices]
-        sampled_basin_ids = sampled_basin_ids[indices]
-
+        logging.info(f"Filtered samples: x_d shape {sampled_x_d.shape}, x_s shape {sampled_x_s.shape}, basin_ids shape {sampled_basin_ids.shape}")
+        
         return sampled_x_d, sampled_x_s, sampled_basin_ids
 
     def _get_stratified_background(self, combined_inputs_tensor: Tensor, basin_ids: np.ndarray) -> Tensor:

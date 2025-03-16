@@ -100,7 +100,6 @@ class ShapClusterAnalyzer:
                 - S is the number of static features 
         """
         self.inputs = self.analyzer.get_inputs()
-        logging.info(f"Extracted inputs: x_d shape {self.inputs['x_d'].shape}, x_s shape {self.inputs['x_s'].shape}")
         return self.inputs
     
     def _wrap_model(self) -> nn.Module:
