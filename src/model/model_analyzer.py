@@ -1,4 +1,7 @@
+import gc
+import logging
 from pathlib import Path
+from typing import Dict
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -50,7 +53,7 @@ class ModelAnalyzer(BaseModelLoader):
         all_hidden_states = []
         
         with torch.no_grad():
-            for batch_data in tqdm(self.dataloader, desc="Processing batches"):
+            for batch_data in tqdm(self.dataloader, desc="Loading hidden states"):
                 batch = {
                     k: v.to(self.cfg.device)
                     for k, v in batch_data.items()
@@ -60,3 +63,53 @@ class ModelAnalyzer(BaseModelLoader):
                 all_hidden_states.append(model_output["h_n"].squeeze(1).cpu())
 
         return torch.cat(all_hidden_states)
+
+    def get_inputs(self) -> Dict[str, np.ndarray]:
+        """
+        Extract and combine the dynamic and static input features from the dataset.
+        
+        Returns:
+            dict: {
+                "x_d": np.ndarray of shape [num_samples, T, D],
+                "x_s": np.ndarray of shape [num_samples, S]
+            }
+            where:
+                - num_samples is the total number of samples
+                - T is the number of timesteps (sequence length)
+                - D is the number of dynamic features
+                - S is the number of static features 
+        """
+        self.get_dataset()
+        self.model.eval()
+
+        first_batch = next(iter(self.dataloader))
+        batch_x_d = first_batch['x_d'].detach().cpu().numpy()  # shape: [batch, T, D]
+        batch_x_s = first_batch['x_s'].detach().cpu().numpy()  # shape: [batch, S]
+        _, T, D = batch_x_d.shape
+        _, S = batch_x_s.shape
+
+        # Determine total number of samples
+        num_samples = len(self.dataset)
+        
+        # Pre-allocate the output arrays
+        x_d_full = np.empty((num_samples, T, D), dtype=batch_x_d.dtype)
+        x_s_full = np.empty((num_samples, S), dtype=batch_x_s.dtype)
+
+        start_idx = 0
+        with torch.no_grad():
+            for batch_data in tqdm(self.dataloader, desc="Extracting inputs"):
+                batch_x_d = batch_data['x_d'].detach().cpu().numpy()  # shape: [batch, T, D]
+                batch_x_s = batch_data['x_s'].detach().cpu().numpy()  # shape: [batch, S]
+                batch_size = batch_x_d.shape[0]
+                
+                x_d_full[start_idx:start_idx + batch_size] = batch_x_d
+                x_s_full[start_idx:start_idx + batch_size] = batch_x_s
+                start_idx += batch_size
+
+        # Clean up
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        inputs = {"x_d": x_d_full, "x_s": x_s_full}
+        logging.info(f"Extracted inputs: x_d shape {x_d_full.shape}, x_s shape {x_s_full.shape}")
+        return inputs

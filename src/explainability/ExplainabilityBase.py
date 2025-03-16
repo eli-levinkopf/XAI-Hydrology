@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import yaml
 import torch
 from torch import Tensor, nn
@@ -12,9 +13,12 @@ from typing import Any
 from neuralhydrology.utils.config import Config
 from neuralhydrology.modelzoo.cudalstm import CudaLSTM
 
+from model.model_analyzer import ModelAnalyzer
+
+BATCH_SIZE = 256
 
 class ExplainabilityBase:
-    def __init__(self, run_dir: str, epoch: int, num_samples: int, analysis_name: str, period: str) -> None:
+    def __init__(self, run_dir: str, epoch: int, num_samples: int, analysis_name: str, period: str = "test") -> None:
         """
         Base class for any explainability analysis on a NeuralHydrology model.
 
@@ -38,6 +42,8 @@ class ExplainabilityBase:
 
         self.model = self._load_model()
         self.results_folder = self._setup_results_folder()
+
+        self.model_analyzer = ModelAnalyzer(run_dir=Path(self.run_dir), epoch=self.epoch, period=self.period)
 
     def _load_config(self) -> dict[str, Any]:
         """Load the 'config.yml' into a Python dict."""
@@ -253,6 +259,25 @@ class ExplainabilityBase:
         final_x_d = final_x_d[indices]
         final_x_s = final_x_s[indices]
 
+        return final_x_d, final_x_s
+
+    def load_and_sample_inputs(self) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Randomly sample a subset (of size self.num_samples) of the full inputs.
+        Returns:
+            final_x_d: np.ndarray of shape [num_samples, seq_length, n_dynamic]
+            final_x_s: np.ndarray of shape [num_samples, n_static]
+        """
+        inputs = self.model_analyzer.get_inputs()
+        x_d, x_s = inputs["x_d"], inputs["x_s"]
+        total_samples = x_d.shape[0]
+        if self.num_samples < total_samples:
+            indices = np.random.choice(total_samples, size=self.num_samples, replace=False)
+            final_x_d = x_d[indices]
+            final_x_s = x_s[indices]
+        else:
+            final_x_d = x_d
+            final_x_s = x_s
         return final_x_d, final_x_s
     
     def _aggregate_static_features(self, values: np.ndarray, x_s: np.ndarray = None) -> tuple[np.ndarray, np.ndarray, list[str]]:

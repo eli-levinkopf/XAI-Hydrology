@@ -216,7 +216,7 @@ class SHAPAnalysis(ExplainabilityBase):
         self.model.to(device)
 
         # Sample dynamic and static inputs
-        final_x_d, final_x_s = self._randomly_sample_basin_data()
+        final_x_d, final_x_s = self.load_and_sample_inputs()
 
         if self.use_embedding:
             # Get the embedding outputs from embedding_net, then process to flatten.

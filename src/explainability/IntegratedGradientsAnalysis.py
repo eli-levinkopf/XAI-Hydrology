@@ -90,7 +90,7 @@ class IntegratedGradientsAnalysis(ExplainabilityBase):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(device)
 
-        final_x_d, final_x_s = self._randomly_sample_basin_data()
+        final_x_d, final_x_s = self.load_and_sample_inputs()
         combined_inputs = np.hstack([
             final_x_d.reshape(len(final_x_d), -1),
             final_x_s
@@ -238,7 +238,7 @@ def main():
     parser.add_argument('--epoch', type=int, required=True, help='Which epoch checkpoint to load.')
     parser.add_argument('--num_samples', type=int, default=100000,
                         help='Number of samples to use for IG analysis.')
-    parser.add_argument('--period', type=str, default="validation", help='Period to load data from (train/validation/test).')
+    parser.add_argument('--period', type=str, default="test", help='Period to load data from (train/validation/test).')
     parser.add_argument('--reuse_ig', action='store_true',
                         help='If set, reuse ig_values.npy and ig_inputs.npz if they exist.')
 

@@ -7,7 +7,7 @@ from pathlib import Path
 from matplotlib import pyplot as plt
 import torch
 import torch.multiprocessing
-torch.multiprocessing.set_sharing_strategy('file_system')
+torch.multiprocessing.set_sharing_strategy('file_system') # TODO: fix this issue and remove it
 torch.backends.cudnn.enabled = False
 from torch import Tensor, nn
 import numpy as np
@@ -62,20 +62,21 @@ class ShapClusterAnalyzer:
     BATCH_SIZE = 256
     CLUSTER_SAMPLE_FRACTION = 0.01
     
-    def __init__(
-        self, 
-        analyzer: ModelAnalyzer, 
-        clusterer: HiddenStateClusterer
-    ) -> None:
+    def __init__(self, run_dir: Path, epoch: int, period: str = "test", n_clusters: int = 5) -> None:
         """
+        Initialize the SHAP cluster analyzer.  
+
         Args:
-            analyzer (ModelAnalyzer): Instance for data/model analysis.
-            clusterer (HiddenStateClusterer): Instance for clustering.
+            run_dir (Path): Path to the run directory.
+            epoch (int): Epoch number for the model.
+            period (str, optional): Dataset period to analyze. Defaults to "test".
+            n_clusters (int, optional): Number of clusters. Defaults to 5.
         """
-        self.analyzer = analyzer
-        self.clusterer = clusterer
+        self.analyzer = ModelAnalyzer(run_dir=run_dir, epoch=epoch, period=period)
+        self.clusterer = HiddenStateClusterer(self.analyzer, n_clusters=n_clusters)
+
+        self.run_dir = run_dir
         self.cfg = self.analyzer.cfg
-        self.run_dir = self.analyzer.run_dir
         self.inputs: Optional[np.ndarray] = None
         self.seq_length = self.cfg.seq_length
         self.dynamic_features = self.cfg.dynamic_inputs
@@ -83,9 +84,9 @@ class ShapClusterAnalyzer:
         self.results_folder = run_dir / period / f"model_epoch{epoch:03d}" / "shap" / "hidden_clusters"
         os.makedirs(self.results_folder, exist_ok=True)
     
-    def extract_inputs(self) -> Dict[str, np.ndarray]:
+    def _get_inputs(self) -> Dict[str, np.ndarray]:
         """
-        Extract and combine the dynamic and static input features from the dataset.
+        Extract the dynamic and static input features from the dataset.
         
         Returns:
             dict: {
@@ -98,39 +99,8 @@ class ShapClusterAnalyzer:
                 - D is the number of dynamic features
                 - S is the number of static features 
         """
-        self.analyzer.get_dataset()
-        self.analyzer.model.eval()
-
-        first_batch = next(iter(self.analyzer.dataloader))
-        batch_x_d = first_batch['x_d'].detach().cpu().numpy()  # shape: [batch, T, D]
-        batch_x_s = first_batch['x_s'].detach().cpu().numpy()  # shape: [batch, S]
-        _, T, D = batch_x_d.shape
-        _, S = batch_x_s.shape
-
-        # Determine total number of samples
-        num_samples = len(self.analyzer.dataset)
-        
-        # Pre-allocate the output arrays
-        x_d_full = np.empty((num_samples, T, D), dtype=batch_x_d.dtype)
-        x_s_full = np.empty((num_samples, S), dtype=batch_x_s.dtype)
-
-        start_idx = 0
-        with torch.no_grad():
-            for batch_data in tqdm(self.analyzer.dataloader, desc="Extracting inputs"):
-                batch_x_d = batch_data['x_d'].detach().cpu().numpy()  # shape: [batch, T, D]
-                batch_x_s = batch_data['x_s'].detach().cpu().numpy()  # shape: [batch, S]
-                batch_size = batch_x_d.shape[0]
-                
-                x_d_full[start_idx:start_idx + batch_size] = batch_x_d
-                x_s_full[start_idx:start_idx + batch_size] = batch_x_s
-                start_idx += batch_size
-
-        # Clean up
-        gc.collect()
-        torch.cuda.empty_cache()
-
-        self.inputs = {"x_d": x_d_full, "x_s": x_s_full}
-        logging.info(f"Extracted inputs: x_d shape {x_d_full.shape}, x_s shape {x_s_full.shape}")
+        self.inputs = self.analyzer.get_inputs()
+        logging.info(f"Extracted inputs: x_d shape {self.inputs['x_d'].shape}, x_s shape {self.inputs['x_s'].shape}")
         return self.inputs
     
     def _wrap_model(self) -> nn.Module:
@@ -351,7 +321,7 @@ class ShapClusterAnalyzer:
             self.clusterer.perform_clustering()
         
         if self.inputs is None:
-            self.extract_inputs()
+            self._get_inputs()
         
         results = {}        
         for cluster_id in range(self.clusterer.n_clusters):
@@ -369,12 +339,5 @@ class ShapClusterAnalyzer:
 
 if __name__ == "__main__":
     run_dir = Path("/sci/labs/efratmorin/eli.levinkopf/batch_runs/runs/lstm_caravan_baseline_1402_122018")
-    epoch = 23
-    period = "test"
-    n_clusters = 5
-
-    analyzer = ModelAnalyzer(run_dir=run_dir, epoch=epoch, period=period)
-    clusterer = HiddenStateClusterer(analyzer, n_clusters=n_clusters)
-    shap_cluster_analyzer = ShapClusterAnalyzer(analyzer, clusterer)
-   
+    shap_cluster_analyzer = ShapClusterAnalyzer(run_dir=run_dir, epoch=23, n_clusters=5)   
     results = shap_cluster_analyzer.run_all_clusters()
