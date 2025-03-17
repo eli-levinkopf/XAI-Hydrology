@@ -215,8 +215,8 @@ class SHAPAnalysis(ExplainabilityBase):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(device)
 
-        # Sample dynamic and static inputs
-        final_x_d, final_x_s = self.load_and_sample_inputs()
+        # Sample dynamic and static inputs (and record the global sample indices)
+        final_x_d, final_x_s, sample_indices = self.load_and_sample_inputs()
 
         if self.use_embedding:
             # Get the embedding outputs from embedding_net, then process to flatten.
@@ -258,7 +258,6 @@ class SHAPAnalysis(ExplainabilityBase):
                 shap_values_batches.append(batch_values)
                 pbar.update(len(batch))
 
-                # Clear CUDA cache periodically
                 if i % (BATCH_SIZE * 10) == 0:
                     torch.cuda.empty_cache()
 
@@ -266,10 +265,12 @@ class SHAPAnalysis(ExplainabilityBase):
         logging.info(f"SHAP values shape: {shap_values.shape}")
 
         # Save results for reuse (naming files differently if embedding is used)
-        np.save(os.path.join(self.results_folder, f"{'shap_values_embedding' if self.use_embedding else 'shap_values'}.npy"), shap_values)
-        np.savez(os.path.join(self.results_folder, f"{'inputs_embedding' if self.use_embedding else 'inputs'}.npz"), x_d=final_x_d, x_s=final_x_s)
+        shap_filename = f"{'shap_values_embedding' if self.use_embedding else 'shap_values'}.npy"
+        inputs_filename = f"{'inputs_embedding' if self.use_embedding else 'inputs'}.npz"
+        np.save(os.path.join(self.results_folder, shap_filename), shap_values)
+        np.savez(os.path.join(self.results_folder, inputs_filename), x_d=final_x_d, x_s=final_x_s)
+        np.save(os.path.join(self.results_folder, "sample_indices.npy"), sample_indices)
 
-        # Clean up
         torch.cuda.empty_cache()
 
         return shap_values, {"x_d": final_x_d, "x_s": final_x_s}
@@ -482,14 +483,19 @@ def main():
     analysis = SHAPAnalysis(args.run_dir, args.epoch, args.num_samples, period=args.period, use_embedding=args.use_embedding)
 
     if args.reuse_shap:
-        shap_values_path = os.path.join(analysis.results_folder, f"{'shap_values_embedding' if args.use_embedding else 'shap_values'}.npy")
-        inputs_path = os.path.join(analysis.results_folder, f"{'inputs_embedding' if args.use_embedding else 'inputs'}.npz")
-        if os.path.exists(shap_values_path) and os.path.exists(inputs_path):
+        shap_filename = f"{'shap_values_embedding' if args.use_embedding else 'shap_values'}.npy"
+        inputs_filename = f"{'inputs_embedding' if args.use_embedding else 'inputs'}.npz"
+        sample_indices_path = os.path.join(analysis.results_folder, "sample_indices.npy")
+        shap_values_path = os.path.join(analysis.results_folder, shap_filename)
+        inputs_path = os.path.join(analysis.results_folder, inputs_filename)
+        if os.path.exists(shap_values_path) and os.path.exists(inputs_path) and os.path.exists(sample_indices_path):
             logging.info("Reusing existing SHAP files. Loading from disk...")
             shap_values = np.load(shap_values_path)
             inputs = np.load(inputs_path)
+            # sample_indices is saved for metadata but not used here directly.
+            sample_indices = np.load(sample_indices_path)
         else:
-            raise FileNotFoundError("Reuse flag set, but SHAP files not found. Please run SHAP analysis from scratch.")
+            raise FileNotFoundError("Reuse flag set, but one or more SHAP files not found. Please run SHAP analysis from scratch.")
     else:
         shap_values, inputs = analysis.run_shap()
 

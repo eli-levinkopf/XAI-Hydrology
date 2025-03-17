@@ -112,8 +112,8 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
         mask = self.filter_fn(torch.tensor(y, dtype=torch.float32))
         if torch.is_tensor(mask):
             mask = mask.cpu().numpy()
-        x_d_filtered = x_d[mask]
-        x_s_filtered = x_s[mask]
+        x_d = x_d[mask]
+        x_s = x_s[mask]
         basin_ids_filtered = basin_ids[mask]
         
         # Compute per-basin sampling targets
@@ -128,8 +128,8 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
             target = basin_targets.get(basin, 0)
             if len(indices) > target:
                 indices = np.random.choice(indices, size=target, replace=False)
-            sampled_x_d.append(x_d_filtered[indices])
-            sampled_x_s.append(x_s_filtered[indices])
+            sampled_x_d.append(x_d[indices])
+            sampled_x_s.append(x_s[indices])
             sampled_basin_ids.append(np.array([basin] * len(indices)))
         
         sampled_x_d = np.concatenate(sampled_x_d, axis=0)

@@ -261,12 +261,14 @@ class ExplainabilityBase:
 
         return final_x_d, final_x_s
 
-    def load_and_sample_inputs(self) -> tuple[np.ndarray, np.ndarray]:
+    def load_and_sample_inputs(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Randomly sample a subset (of size self.num_samples) of the full inputs.
+
         Returns:
             final_x_d: np.ndarray of shape [num_samples, seq_length, n_dynamic]
             final_x_s: np.ndarray of shape [num_samples, n_static]
+            sample_indices: np.ndarray of shape [num_samples] containing the global indices of the selected samples.
         """
         inputs = self.model_analyzer.get_inputs()
         x_d, x_s = inputs["x_d"], inputs["x_s"]
@@ -278,7 +280,8 @@ class ExplainabilityBase:
         else:
             final_x_d = x_d
             final_x_s = x_s
-        return final_x_d, final_x_s
+            indices = np.arange(total_samples)
+        return final_x_d, final_x_s, indices
     
     def _aggregate_static_features(self, values: np.ndarray, x_s: np.ndarray = None) -> tuple[np.ndarray, np.ndarray, list[str]]:
         """

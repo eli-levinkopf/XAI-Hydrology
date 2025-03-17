@@ -2,7 +2,6 @@ import logging
 import os
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-import gc
 from pathlib import Path
 from matplotlib import pyplot as plt
 import torch
@@ -62,7 +61,7 @@ class ShapClusterAnalyzer:
     BATCH_SIZE = 256
     CLUSTER_SAMPLE_FRACTION = 0.01
     
-    def __init__(self, run_dir: Path, epoch: int, period: str = "test", n_clusters: int = 5) -> None:
+    def __init__(self, run_dir: Path, epoch: int, period: str = "test", n_clusters: int = 5, reuse_shap: bool = False) -> None:
         """
         Initialize the SHAP cluster analyzer.  
 
@@ -71,11 +70,14 @@ class ShapClusterAnalyzer:
             epoch (int): Epoch number for the model.
             period (str, optional): Dataset period to analyze. Defaults to "test".
             n_clusters (int, optional): Number of clusters. Defaults to 5.
+            reuse_shap (bool, optional): If True, use precomputed SHAP values. Defaults to False.
         """
         self.analyzer = ModelAnalyzer(run_dir=run_dir, epoch=epoch, period=period)
         self.clusterer = HiddenStateClusterer(self.analyzer, n_clusters=n_clusters)
 
         self.run_dir = run_dir
+        self.epoch = epoch
+        self.period = period
         self.cfg = self.analyzer.cfg
         self.inputs: Optional[np.ndarray] = None
         self.seq_length = self.cfg.seq_length
@@ -83,6 +85,32 @@ class ShapClusterAnalyzer:
         self.static_features = self.cfg.static_attributes
         self.results_folder = run_dir / period / f"model_epoch{epoch:03d}" / "shap" / "hidden_clusters"
         os.makedirs(self.results_folder, exist_ok=True)
+
+        # If reuse_shap is True, load precomputed SHAP values, inputs, and sample indices from the SHAP analysis folder
+        self.reuse_shap = reuse_shap
+        self.loaded_shap_values = None
+        self.loaded_inputs = None
+        self.loaded_sample_indices = None
+        if self.reuse_shap:
+            self._load_precomputed_shap()
+
+    def _load_precomputed_shap(self) -> None:
+        """
+        Load the precomputed SHAP values, inputs, and sample indices from the SHAP analysis folder.
+        Assumes that shap_analysis.py saved these files in:
+        run_dir/<period>/model_epoch<epoch>/shap/
+        """
+        base_folder = self.run_dir / self.period / f"model_epoch{self.epoch:03d}" / "shap"
+        shap_values_path = os.path.join(base_folder, "shap_values.npy")
+        inputs_path = os.path.join(base_folder, "inputs.npz")
+        sample_indices_path = os.path.join(base_folder, "sample_indices.npy")
+        if os.path.exists(shap_values_path) and os.path.exists(inputs_path) and os.path.exists(sample_indices_path):
+            logging.info("Loading precomputed SHAP values and metadata...")
+            self.loaded_shap_values = np.load(shap_values_path)
+            self.loaded_inputs = np.load(inputs_path)
+            self.loaded_sample_indices = np.load(sample_indices_path)
+        else:
+            raise FileNotFoundError(f"Precomputed SHAP files or sample indices not found in {base_folder}. Please run SHAP analysis first, or set reuse_shap=False.")
     
     def _get_inputs(self) -> Dict[str, np.ndarray]:
         """
@@ -129,19 +157,21 @@ class ShapClusterAnalyzer:
             cluster_id (int): The cluster for which to run SHAP analysis
                 
         Returns:
-            shap_values (np.ndarray): SHAP values for the cluster.
-            inputs (dict): A dictionary containing:
-                - "x_d" (np.ndarray): Dynamic input values, shape [N, T, D].
-                - "x_s" (np.ndarray): Static input values, shape [N, S].
+            Tuple[np.ndarray, Dict[str, np.ndarray]]:
+                shap_values (np.ndarray): SHAP values for the cluster.
+                inputs (dict): A dictionary containing:
+                    - "x_d" (np.ndarray): Dynamic input values, shape [N, T, D].
+                    - "x_s" (np.ndarray): Static input values, shape [N, S].
         """
         # Get indices of samples belonging to the given cluster
         cluster_indices = np.where(self.clusterer.cluster_labels == cluster_id)[0]
         if len(cluster_indices) == 0:
             raise ValueError(f"No samples found for cluster {cluster_id}.")
 
-        # Randomly select 10% of the cluster samples (at least one sample)
+        # Randomly sample a fraction of cluster samples (at least one sample)
         cluster_indices = np.random.choice(cluster_indices, 
-                                           size=max(1, int(self.CLUSTER_SAMPLE_FRACTION * len(cluster_indices))), replace=False)
+                                           size=max(1, int(self.CLUSTER_SAMPLE_FRACTION * len(cluster_indices))), 
+                                           replace=False)
 
         x_d = self.inputs["x_d"][cluster_indices] # shape: [N, T, D]
         x_s = self.inputs["x_s"][cluster_indices] # shape: [N, S]
@@ -197,6 +227,36 @@ class ShapClusterAnalyzer:
 
         return shap_values, inputs
     
+    def _get_cluster_shap_values_from_precomputed(self, cluster_id: int) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+        """
+        Retrieve SHAP values and corresponding inputs for a given cluster using the precomputed values.
+    
+        Args:
+            cluster_id (int): Cluster ID.
+    
+        Returns:
+            Tuple[np.ndarray, Dict[str, np.ndarray]]:
+                shap_values (np.ndarray): SHAP values for the cluster.
+                inputs (dict): A dictionary containing:
+                    - "x_d" (np.ndarray): Dynamic input values, shape [N, T, D].
+                    - "x_s" (np.ndarray): Static input values, shape [N, S].
+        """
+        # Obtain the global indices of samples belonging to the given cluster
+        global_cluster_indices = np.where(self.clusterer.cluster_labels == cluster_id)[0]
+        if len(global_cluster_indices) == 0:
+            raise ValueError(f"No samples found for cluster {cluster_id}.")
+
+        # Use the loaded sample indices (global indices for which SHAP was computed) to identify the intersection
+        mask = np.isin(self.loaded_sample_indices, global_cluster_indices)
+        if np.sum(mask) == 0:
+            raise ValueError(f"No precomputed SHAP values available for cluster {cluster_id}.")
+        
+        shap_values = self.loaded_shap_values[mask]
+        x_d = self.loaded_inputs["x_d"][mask]
+        x_s = self.loaded_inputs["x_s"][mask]
+        logging.info(f"Cluster {cluster_id}: {shap_values.shape[0]} samples with precomputed SHAP values.")
+        return shap_values, {"x_d": x_d, "x_s": x_s}
+
     def _plot_shap_summary(self, combined_shap: np.ndarray, combined_inputs: np.ndarray, 
                            feature_names: list, cluster_id: int) -> None:
         """Generates and saves a SHAP summary plot for the given cluster.
@@ -242,12 +302,12 @@ class ShapClusterAnalyzer:
             feature_names (list): List of feature names, with dynamic features followed by static features, with shape [D + S].
             cluster_id (int): Identifier for the cluster.
         """
-        # Compute signed medians for dynamic and static features.
+        # Compute signed medians for dynamic and static features
         dynamic_median = np.median(dynamic_shap_sum, axis=0)
         static_median = np.median(static_shap, axis=0)
         median_profile = np.concatenate([dynamic_median, static_median], axis=0)
         
-        # Compute median absolute values for dynamic and static features.
+        # Compute median absolute values for dynamic and static features
         dynamic_median_abs = np.median(np.abs(dynamic_shap_sum), axis=0)
         static_median_abs = np.median(np.abs(static_shap), axis=0)
         median_profile_abs = np.concatenate([dynamic_median_abs, static_median_abs], axis=0)
@@ -294,14 +354,14 @@ class ShapClusterAnalyzer:
         n_samples = shap_values.shape[0]
         n_dynamic = len(self.dynamic_features)
 
-        # Split SHAP values into dynamic and static parts.
+        # Split SHAP values into dynamic and static parts
         dynamic_shap = shap_values[:, :self.seq_length * n_dynamic].reshape(n_samples, self.seq_length, n_dynamic)
         static_shap = shap_values[:, self.seq_length * n_dynamic:]
 
-        # Sum dynamic SHAP values over time to obtain shape [N, D].
+        # Sum dynamic SHAP values over time to obtain shape [N, D]
         dynamic_shap_sum = dynamic_shap.sum(axis=1)
 
-        # Sum dynamic inputs over time and combine with static inputs.
+        # Sum dynamic inputs over time and combine with static inputs
         combined_shap = np.concatenate([dynamic_shap_sum, static_shap], axis=1) # shape: [N, D + S]
         combined_inputs = np.concatenate([x_d.sum(axis=1), x_s], axis=1) # shape: [N, D + S]
         feature_names = self.dynamic_features + self.static_features
@@ -314,7 +374,7 @@ class ShapClusterAnalyzer:
         Run SHAP analysis for all clusters.
                 
         Returns:
-            Dict[int, np.ndarray]: Dictionary mapping cluster IDs to SHAP values
+            Dict[int, np.ndarray]: Dictionary mapping cluster IDs to SHAP values.
         """
         if self.clusterer.cluster_labels is None:
             self.clusterer.perform_clustering()
@@ -325,9 +385,12 @@ class ShapClusterAnalyzer:
         results = {}        
         for cluster_id in range(self.clusterer.n_clusters):
             try:
-                shap_values, inputs = self.run_shap_for_cluster(
-                    cluster_id=cluster_id,
-                )
+                if self.reuse_shap:
+                    # Use the helper function to get precomputed SHAP values for the cluster
+                    shap_values, inputs = self._get_cluster_shap_values_from_precomputed(cluster_id)
+                else:
+                    # Compute SHAP values on the fly for this cluster
+                    shap_values, inputs = self.run_shap_for_cluster(cluster_id=cluster_id)
                 self._generate_cluster_shap_plots(shap_values, inputs, cluster_id)
                 results[cluster_id] = shap_values
             except ValueError as e:
@@ -338,5 +401,5 @@ class ShapClusterAnalyzer:
 
 if __name__ == "__main__":
     run_dir = Path("/sci/labs/efratmorin/eli.levinkopf/batch_runs/runs/lstm_caravan_baseline_1402_122018")
-    shap_cluster_analyzer = ShapClusterAnalyzer(run_dir=run_dir, epoch=23, n_clusters=5)   
+    shap_cluster_analyzer = ShapClusterAnalyzer(run_dir=run_dir, epoch=23, n_clusters=5, reuse_shap=True)
     results = shap_cluster_analyzer.run_all_clusters()

@@ -90,7 +90,7 @@ class IntegratedGradientsAnalysis(ExplainabilityBase):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(device)
 
-        final_x_d, final_x_s = self.load_and_sample_inputs()
+        final_x_d, final_x_s, _ = self.load_and_sample_inputs()
         combined_inputs = np.hstack([
             final_x_d.reshape(len(final_x_d), -1),
             final_x_s
