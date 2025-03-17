@@ -61,23 +61,52 @@ class ModelEvaluator:
             metrics_summary.to_csv(os.path.join(self.output_dir, 'metrics_summary.csv'))
             logging.info(f"Metrics summary saved to {os.path.join(self.output_dir, 'metrics_summary.csv')}")
 
-            # Plot CDF of NSE values
+            # Plot FULL CDF of NSE values
             plt.figure(figsize=(10, 6))
             sorted_nse = np.sort(self.metrics['NSE'])
             cdf = np.arange(1, len(sorted_nse) + 1) / len(sorted_nse)
             plt.plot(sorted_nse, cdf, label='NSE CDF')
+            
             negative_nse_percentage = (self.metrics['NSE'] < 0).mean() * 100
             median_nse = self.metrics['NSE'].median()
+            
             plt.title(f'NSE CDF\n({negative_nse_percentage:.1f}% of NSEs < 0)\nMedian NSE: {median_nse:.3f}')
             plt.xlabel('NSE')
             plt.ylabel('CDF')
-            plt.grid()
             plt.savefig(os.path.join(self.output_dir, 'nse_cdf.png'))
             plt.close()
+            
             logging.info(f"NSE CDF plot saved to {os.path.join(self.output_dir, 'nse_cdf.png')}")
 
+            # Plot ZOOMED-IN CDF (clip outliers)
+            # Define a threshold to exclude extremely negative NSE values
+            threshold = 0
+            clipped_df = self.metrics[self.metrics['NSE'] > threshold]
+            
+            if not clipped_df.empty:
+                plt.figure(figsize=(10, 6))
+                sorted_nse_clipped = np.sort(clipped_df['NSE'])
+                cdf_clipped = np.arange(1, len(sorted_nse_clipped) + 1) / len(sorted_nse_clipped)
+                plt.plot(sorted_nse_clipped, cdf_clipped, label=f'NSE CDF')
+                
+                median_nse_clipped = clipped_df['NSE'].median()
+                
+                plt.title(f'Median NSE: {median_nse_clipped:.3f}')
+                plt.xlabel('NSE')
+                plt.ylabel('CDF')
+                plt.savefig(os.path.join(self.output_dir, 'nse_cdf_clipped.png'))
+                plt.close()
+                
+                logging.info(f"Zoomed-in NSE CDF plot (NSE > {threshold}) saved to "
+                            f"{os.path.join(self.output_dir, 'nse_cdf_clipped.png')}")
+            else:
+                logging.warning(f"No data points with NSE > {threshold}; zoomed-in plot not created.")
+
             # Identify outliers based on NSE and MSE
-            outliers = self.metrics[(self.metrics['NSE'] < -1) | (self.metrics['MSE'] > self.metrics['MSE'].quantile(0.95))]
+            outliers = self.metrics[
+                (self.metrics['NSE'] < -1) | 
+                (self.metrics['MSE'] > self.metrics['MSE'].quantile(0.95))
+            ]
             outliers.to_csv(os.path.join(self.output_dir, 'outliers_summary.csv'))
             logging.info(f"Outliers saved to {os.path.join(self.output_dir, 'outliers_summary.csv')}")
 
