@@ -78,8 +78,7 @@ class ModelEvaluator:
             
             logging.info(f"NSE CDF plot saved to {os.path.join(self.output_dir, 'nse_cdf.png')}")
 
-            # Plot ZOOMED-IN CDF (clip outliers)
-            # Define a threshold to exclude extremely negative NSE values
+            # Plot ZOOMED-IN CDF (clip outliers) for NSE
             threshold = 0
             clipped_df = self.metrics[self.metrics['NSE'] > threshold]
             
@@ -87,7 +86,7 @@ class ModelEvaluator:
                 plt.figure(figsize=(10, 6))
                 sorted_nse_clipped = np.sort(clipped_df['NSE'])
                 cdf_clipped = np.arange(1, len(sorted_nse_clipped) + 1) / len(sorted_nse_clipped)
-                plt.plot(sorted_nse_clipped, cdf_clipped, label=f'NSE CDF')
+                plt.plot(sorted_nse_clipped, cdf_clipped, label='NSE CDF')
                 
                 median_nse_clipped = clipped_df['NSE'].median()
                 
@@ -97,10 +96,49 @@ class ModelEvaluator:
                 plt.savefig(os.path.join(self.output_dir, 'nse_cdf_clipped.png'))
                 plt.close()
                 
-                logging.info(f"Zoomed-in NSE CDF plot (NSE > {threshold}) saved to "
+                logging.info(f"Zoomed-in NSE CDF plot saved to "
                             f"{os.path.join(self.output_dir, 'nse_cdf_clipped.png')}")
             else:
                 logging.warning(f"No data points with NSE > {threshold}; zoomed-in plot not created.")
+
+            # Plot FULL CDF of KGE values
+            plt.figure(figsize=(10, 6))
+            sorted_kge = np.sort(self.metrics['KGE'])
+            cdf_kge = np.arange(1, len(sorted_kge) + 1) / len(sorted_kge)
+            plt.plot(sorted_kge, cdf_kge, label='KGE CDF')
+            
+            negative_kge_percentage = (self.metrics['KGE'] < 0).mean() * 100
+            median_kge = self.metrics['KGE'].median()
+            
+            plt.title(f'KGE CDF\n({negative_kge_percentage:.1f}% of KGEs < 0)\nMedian KGE: {median_kge:.3f}')
+            plt.xlabel('KGE')
+            plt.ylabel('CDF')
+            plt.savefig(os.path.join(self.output_dir, 'kge_cdf.png'))
+            plt.close()
+            
+            logging.info(f"KGE CDF plot saved to {os.path.join(self.output_dir, 'kge_cdf.png')}")
+
+            # Plot ZOOMED-IN CDF (clip negatives) for KGE values
+            threshold_kge = 0
+            clipped_kge_df = self.metrics[self.metrics['KGE'] > threshold_kge]
+            
+            if not clipped_kge_df.empty:
+                plt.figure(figsize=(10, 6))
+                sorted_kge_clipped = np.sort(clipped_kge_df['KGE'])
+                cdf_kge_clipped = np.arange(1, len(sorted_kge_clipped) + 1) / len(sorted_kge_clipped)
+                plt.plot(sorted_kge_clipped, cdf_kge_clipped, label='KGE CDF')
+                
+                median_kge_clipped = clipped_kge_df['KGE'].median()
+                
+                plt.title(f'Median KGE: {median_kge_clipped:.3f}')
+                plt.xlabel('KGE')
+                plt.ylabel('CDF')
+                plt.savefig(os.path.join(self.output_dir, 'kge_cdf_clipped.png'))
+                plt.close()
+                
+                logging.info(f"Zoomed-in KGE CDF plot saved to {os.path.join(self.output_dir, 'kge_cdf_clipped.png')}")
+            else:
+                logging.warning(f"No data points with KGE > {threshold_kge}; zoomed-in plot not created.")
 
             # Identify outliers based on NSE and MSE
             outliers = self.metrics[

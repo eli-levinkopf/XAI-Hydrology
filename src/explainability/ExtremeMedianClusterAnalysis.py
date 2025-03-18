@@ -84,7 +84,8 @@ class ClusterAnalyzer:
                  X: np.ndarray, 
                  n_clusters: int, 
                  n_dim: int, 
-                 clustering_method: str, 
+                 clustering_method: str,
+                 apply_pca: bool = True,
                  random_state: int = 42) -> None:
         """
         Initializes the ClusterAnalyzer.
@@ -99,12 +100,12 @@ class ClusterAnalyzer:
         self.X = X
         self.n_clusters = n_clusters
         self.n_dim = n_dim
-        self.random_state = random_state
         self.clustering_method = clustering_method.lower()
+        self.random_state = random_state
+        self.apply_pca = apply_pca
 
         self.scaler = StandardScaler()
         self.X_scaled: Optional[np.ndarray] = None
-        self.pca: Optional[PCA] = None
         self.X_reduced: Optional[np.ndarray] = None
         self.clusters: Optional[np.ndarray] = None
 
@@ -114,8 +115,9 @@ class ClusterAnalyzer:
 
     def reduce_dimension(self, n_components: Optional[int] = None) -> np.ndarray:
         """
-        Reduces the dimensionality of the data using PCA.
-
+        Transforms the normalized data by applying PCA if `apply_pca` is True.
+        If `apply_pca` is False, returns the scaled data without applying any dimensionality reduction.
+        
         Args:
             n_components (Optional[int], optional): Number of PCA components to use.
                 If None, uses the default self.n_dim. Defaults to None.
@@ -126,8 +128,11 @@ class ClusterAnalyzer:
         if self.X_scaled is None:
             raise ValueError("Data must be normalized before dimension reduction.")
         n_components = n_components or self.n_dim
-        self.pca = PCA(n_components=n_components)
-        self.X_reduced = self.pca.fit_transform(self.X_scaled)
+        if self.apply_pca:
+            pca = PCA(n_components=n_components)
+            self.X_reduced = pca.fit_transform(self.X_scaled)
+        else:
+            self.X_reduced = self.X_scaled
         return self.X_reduced
 
     def perform_clustering(self) -> None:
@@ -411,15 +416,34 @@ class ExtremeMedianClusterAnalysis:
         """
         extreme_file = os.path.join(self.run_dir, self.period, f"model_epoch{self.epoch:03d}", "shap", "aggregated_shap_extreme.p")
         median_file = os.path.join(self.run_dir, self.period, f"model_epoch{self.epoch:03d}", "shap", "aggregated_shap_median.p")
-        self.extreme_loader = SHAPDataLoader(extreme_file)
-        self.median_loader = SHAPDataLoader(median_file)
-        self.extreme_loader.load()
-        self.median_loader.load()
-        self.feature_names = self.extreme_loader.feature_names
-        extreme_ids = set(self.extreme_loader.basin_ids)
-        median_ids = set(self.median_loader.basin_ids)
-        self.common_basin_ids = list(extreme_ids.intersection(median_ids))
-        logging.info(f"Found {len(self.common_basin_ids)} common basins between extreme and median datasets")
+        
+        extreme_exists = os.path.exists(extreme_file)
+        median_exists = os.path.exists(median_file)
+        
+        if not extreme_exists and not median_exists:
+            raise FileNotFoundError("Neither extreme nor median SHAP file found.")
+        
+        if extreme_exists:
+            self.extreme_loader = SHAPDataLoader(extreme_file)
+            self.extreme_loader.load()
+        else:
+            logging.warning(f"Extreme file not found: {extreme_file}.")
+        
+        if median_exists:
+            self.median_loader = SHAPDataLoader(median_file)
+            self.median_loader.load()
+        else:
+            logging.warning(f"Median file not found: {median_file}.")
+        
+        # Determine common basins if both datasets are present
+        if self.extreme_loader and self.median_loader:
+            extreme_ids = set(self.extreme_loader.basin_ids)
+            median_ids = set(self.median_loader.basin_ids)
+            self.common_basin_ids = list(extreme_ids.intersection(median_ids))
+        elif self.extreme_loader:
+            self.common_basin_ids = self.extreme_loader.basin_ids
+        elif self.median_loader:
+            self.common_basin_ids = self.median_loader.basin_ids
 
     def load_gauge_mapping(self, base_dir: str = "/sci/labs/efratmorin/lab_share/FloodsML/data/Caravan/attributes"):
         """
@@ -448,16 +472,19 @@ class ExtremeMedianClusterAnalysis:
         Initializes the ClusterAnalyzer for both extreme and median datasets and
         performs normalization and dimensionality reduction.
         """
-        extreme_data = np.array([self.extreme_loader.aggregated[bid]["signed"] for bid in self.common_basin_ids])
-        median_data = np.array([self.median_loader.aggregated[bid]["signed"] for bid in self.common_basin_ids])
-        self.extreme_analyzer = ClusterAnalyzer(extreme_data, self.extreme_n_clusters, self.extreme_n_dim, 
-                                                clustering_method=self.clustering_method, random_state=self.random_state)
-        self.median_analyzer = ClusterAnalyzer(median_data, self.median_n_clusters, self.median_n_dim, 
-                                               clustering_method=self.clustering_method, random_state=self.random_state)
-        self.extreme_analyzer.normalize()
-        self.median_analyzer.normalize()
-        self.extreme_analyzer.reduce_dimension()
-        self.median_analyzer.reduce_dimension()
+        if self.extreme_loader:
+            extreme_data = np.array([self.extreme_loader.aggregated[bid]["signed"] for bid in self.common_basin_ids])
+            self.extreme_analyzer = ClusterAnalyzer(extreme_data, self.extreme_n_clusters, self.extreme_n_dim,
+                                                    clustering_method=self.clustering_method, random_state=self.random_state)
+            self.extreme_analyzer.normalize()
+            self.extreme_analyzer.reduce_dimension()
+        
+        if self.median_loader:
+            median_data = np.array([self.median_loader.aggregated[bid]["signed"] for bid in self.common_basin_ids])
+            self.median_analyzer = ClusterAnalyzer(median_data, self.median_n_clusters, self.median_n_dim,
+                                                    clustering_method=self.clustering_method, random_state=self.random_state)
+            self.median_analyzer.normalize()
+            self.median_analyzer.reduce_dimension()
 
     def run_clustering(self) -> Tuple[Dict[str, int], Dict[str, int]]:
         """
@@ -468,10 +495,17 @@ class ExtremeMedianClusterAnalysis:
                 - extreme_clusters: Mapping of basin ID to cluster for extreme condition.
                 - median_clusters: Mapping of basin ID to cluster for median condition.
         """
-        self.extreme_analyzer.perform_clustering()
-        self.median_analyzer.perform_clustering()
-        extreme_clusters = {bid: cluster for bid, cluster in zip(self.common_basin_ids, self.extreme_analyzer.clusters)}
-        median_clusters = {bid: cluster for bid, cluster in zip(self.common_basin_ids, self.median_analyzer.clusters)}
+        extreme_clusters = None
+        median_clusters = None
+        
+        if self.extreme_analyzer:
+            self.extreme_analyzer.perform_clustering()
+            extreme_clusters = {bid: cluster for bid, cluster in zip(self.common_basin_ids, self.extreme_analyzer.clusters)}
+        
+        if self.median_analyzer:
+            self.median_analyzer.perform_clustering()
+            median_clusters = {bid: cluster for bid, cluster in zip(self.common_basin_ids, self.median_analyzer.clusters)}
+        
         return extreme_clusters, median_clusters
     
     def plot_geographic_clusters(self, clusters: Dict[str, int], condition: str) -> None:
@@ -819,18 +853,27 @@ class ExtremeMedianClusterAnalysis:
         self.load_gauge_mapping()
         self.setup_analyzers()
         extreme_clusters, median_clusters = self.run_clustering()
-        self.generate_cluster_visualizations("extreme", self.extreme_analyzer, self.extreme_loader, self.extreme_n_clusters)
-        self.generate_cluster_visualizations("median", self.median_analyzer, self.median_loader, self.median_n_clusters)
-        self.plot_geographic_clusters(extreme_clusters, "extreme")
-        self.plot_geographic_clusters(median_clusters, "median")
-        self.cluster_size_distribution(extreme_clusters, median_clusters)
-        transition_matrix = self.create_transition_matrix(extreme_clusters, median_clusters)
-        self.plot_transition_matrices(transition_matrix)
-        self.plot_sankey_diagram(transition_matrix)
-        self.calculate_feature_shifts(extreme_clusters, median_clusters)
-        self.plot_top_feature_shifts()
-        self.calculate_cluster_stability(extreme_clusters, median_clusters)
-        logging.info(f"Comparative analysis completed. Results saved in: {self.results_folder}")
+        
+        # Run visualizations for the available condition(s)
+        if self.extreme_loader:
+            self.generate_cluster_visualizations("extreme", self.extreme_analyzer, self.extreme_loader, self.extreme_n_clusters)
+            self.plot_geographic_clusters(extreme_clusters, "extreme")
+        if self.median_loader:
+            self.generate_cluster_visualizations("median", self.median_analyzer, self.median_loader, self.median_n_clusters)
+            self.plot_geographic_clusters(median_clusters, "median")
+        
+        # Run comparative analyses if both conditions are available
+        if self.extreme_loader and self.median_loader:
+            self.cluster_size_distribution(extreme_clusters, median_clusters)
+            transition_matrix = self.create_transition_matrix(extreme_clusters, median_clusters)
+            self.plot_transition_matrices(transition_matrix)
+            self.plot_sankey_diagram(transition_matrix)
+            self.calculate_feature_shifts(extreme_clusters, median_clusters)
+            self.plot_top_feature_shifts()
+            self.calculate_cluster_stability(extreme_clusters, median_clusters)
+            logging.info(f"Comparative analysis completed. Results saved in: {self.results_folder}")
+        else:
+            logging.info(f"Single condition analysis completed. Results saved in: {self.results_folder}")
 
 class OptimalParameterSearch:
     """
@@ -923,9 +966,9 @@ class OptimalParameterSearch:
         # Run grid search first
         # self.run_grid_search()
         # Run optimal dimensions analysis
-        dim_results = self.cluster_analyzer.find_optimal_dimensions(self.results_folder)
+        # dim_results = self.cluster_analyzer.find_optimal_dimensions(self.results_folder)
         # optimal_components = dim_results['n_components_90']
-        # self.cluster_analyzer.find_optimal_clusters(self.results_folder, n_components=6)
+        self.cluster_analyzer.find_optimal_clusters(self.results_folder, n_components=3)
 
 def parse_args():
     """
