@@ -293,39 +293,41 @@ class SHAPAnalysis(ExplainabilityBase):
             None: The function saves the SHAP summary plot as an image file.
         """
         shap_values = shap_values.squeeze(-1)
-        
         x_d = inputs["x_d"]  # [n_samples, seq_length, n_dynamic]
         x_s = inputs["x_s"]  # [n_samples, n_static]
-
         n_samples = shap_values.shape[0]
         n_dynamic = len(self.dynamic_features)
-        n_static = len(self.static_features)
 
         # Split SHAP values back into dynamic and static parts
-        dynamic_vals = shap_values[:, :self.seq_length * n_dynamic].reshape(n_samples, self.seq_length, n_dynamic)
-        static_vals = shap_values[:, self.seq_length * n_dynamic:]
-
-        # Aggregate static features
-        combined_static_shap, combined_static_inputs, agg_static_names = self._aggregate_static_features(static_vals, x_s)
+        dynamic_shap = shap_values[:, :self.seq_length * n_dynamic].reshape(n_samples, self.seq_length, n_dynamic)
+        static_shap = shap_values[:, self.seq_length * n_dynamic:]
 
         # Sum dynamic features across time
-        dynamic_shap = dynamic_vals.sum(axis=1)
-        dynamic_inputs = x_d.sum(axis=1)
+        dynamic_shap = dynamic_shap.sum(axis=1)
+        x_d = x_d.sum(axis=1)
 
-        combined_shap = np.concatenate([dynamic_shap, combined_static_shap], axis=1)
-        combined_inputs = np.concatenate([dynamic_inputs, combined_static_inputs], axis=1)
-        feature_names = self.dynamic_features + agg_static_names
+        combined_shap = np.concatenate([dynamic_shap, static_shap], axis=1) # shape: [N, D + S]
+        combined_inputs = np.concatenate([x_d, x_s], axis=1) # shape: [N, D + S]
+        feature_names = self.dynamic_features + self.static_features
+
+        # Compute global clipping thresholds:
+        # - Global lower_clip is the minimum of the 0.01st percentiles across all features
+        # - Global upper_clip is the maximum of the 99.99th percentiles across all features
+        # This removes the most extreme 0.01% from each tail
+        lower_clip = min([np.percentile(combined_shap[:, i], 0.01) for i in range(combined_shap.shape[1])])
+        upper_clip = max([np.percentile(combined_shap[:, i], 99.99) for i in range(combined_shap.shape[1])])
+        combined_shap_clipped = np.clip(combined_shap, lower_clip, upper_clip)
 
         # Plot
         plt.figure(figsize=(10, 12))
         shap.summary_plot(
-            combined_shap,
+            combined_shap_clipped,
             combined_inputs,
             feature_names=feature_names,
             max_display=len(feature_names),
             show=False
         )
-        plt.xlim([np.min(combined_shap), np.max(combined_shap)])
+
         summary_plot_path = os.path.join(self.results_folder, "shap_summary_plot.png")
         plt.savefig(summary_plot_path, bbox_inches="tight", dpi=300)
         plt.close()
@@ -425,19 +427,19 @@ class SHAPAnalysis(ExplainabilityBase):
             static_shap_values = shap_values[:, self.seq_length * num_dynamic:]
 
             # Sum dynamic contributions across time and average over samples
-            dynamic_summed_shap = np.sum(np.abs(dynamic_shap_values), axis=1)  # [n_samples, num_dynamic]
-            dynamic_mean_shap = np.mean(dynamic_summed_shap, axis=0)  # [num_dynamic]
+            dynamic_summed_shap = np.sum(dynamic_shap_values, axis=1) # [n_samples, num_dynamic]
+            dynamic_mean_shap = np.mean(np.abs(dynamic_summed_shap), axis=0) # [num_dynamic]
 
-            combined_static_shap, agg_static_names = self._aggregate_static_features(static_shap_values)
-            static_mean_shap = np.mean(np.abs(combined_static_shap), axis=0).squeeze()
+            # combined_static_shap, agg_static_names = self._aggregate_static_features(static_shap_values)
+            static_mean_shap = np.mean(np.abs(static_shap_values), axis=0).squeeze()
 
-            feature_names = self.dynamic_features + agg_static_names
+            feature_names = self.dynamic_features + self.static_features
             mean_shap_values = np.concatenate([dynamic_mean_shap, static_mean_shap])
 
             # Colors for original features.
             dynamic_color = 'skyblue'
             static_color = 'blue'
-            colors = [dynamic_color] * len(self.dynamic_features) + [static_color] * len(agg_static_names)
+            colors = [dynamic_color] * len(self.dynamic_features) + [static_color] * len(self.static_features)
 
         # Sort features by mean absolute SHAP value
         sorted_indices = np.argsort(mean_shap_values)[::-1]
@@ -490,10 +492,10 @@ def main():
         inputs_path = os.path.join(analysis.results_folder, inputs_filename)
         if os.path.exists(shap_values_path) and os.path.exists(inputs_path) and os.path.exists(sample_indices_path):
             logging.info("Reusing existing SHAP files. Loading from disk...")
-            shap_values = np.load(shap_values_path)
-            inputs = np.load(inputs_path)
+            shap_values = np.load(shap_values_path, mmap_mode='r')
+            inputs = np.load(inputs_path, mmap_mode='r')
             # sample_indices is saved for metadata but not used here directly.
-            sample_indices = np.load(sample_indices_path)
+            # sample_indices = np.load(sample_indices_path, mmap_mode='r')
         else:
             raise FileNotFoundError("Reuse flag set, but one or more SHAP files not found. Please run SHAP analysis from scratch.")
     else:

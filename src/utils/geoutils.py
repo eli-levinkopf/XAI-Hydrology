@@ -6,7 +6,8 @@ def plot_clusters_on_world_map(
     basins: list,
     cluster_dict: dict,
     gauge_mapping: dict,
-    output_dir: str
+    output_dir: str,
+    title_details: str = ""
 ):
     """
     Plots basin clusters on an interactive world map using Plotly and saves it as an HTML file.
@@ -16,6 +17,7 @@ def plot_clusters_on_world_map(
         cluster_dict (dict): Mapping of basin_id -> cluster label.
         gauge_mapping (dict): Mapping of basin_id to a dict with 'gauge_lat' and 'gauge_lon'.
         output_dir (str): Directory where the file will be saved. "clusters_world_map.html" will be appended.
+        title_details (str, optional): Additional details to append to the title.
     """
     rows = []
     for bid in basins:
@@ -32,17 +34,22 @@ def plot_clusters_on_world_map(
         return
     
     df = pd.DataFrame(rows)
+    df['cluster'] = df['cluster'].astype(int) + 1 # 1-based indexing
+    df['cluster'] = df['cluster'].astype(str)
     
+    base_title = "Basin Clusters on World Map"
+    title = f"{base_title} ({title_details})" if title_details else base_title
+
     fig = px.scatter_geo(
         df,
         lat='latitude',
         lon='longitude',
         color='cluster',
         hover_name='basin_id',
-        title="Basin Clusters on World Map",
-        color_discrete_sequence=px.colors.qualitative.Set1
+        title=title,
+        color_discrete_sequence=px.colors.qualitative.Set1,
+        category_orders={"cluster": sorted(df['cluster'].unique(), key=lambda x: int(x))}
     )
-    
     fig.update_traces(marker=dict(size=3, opacity=0.7))
     fig.update_layout(
         geo=dict(

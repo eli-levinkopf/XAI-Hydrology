@@ -263,15 +263,13 @@ class ExtremeMedianSHAPAnalysis(SHAPAnalysis):
             combined_samples = []
             for sample in basin_shap:
                 # Dynamic part: reshape and sum over time to aggregate to one value per dynamic feature
-                dyn_part = sample[:self.seq_length * n_dynamic].reshape(self.seq_length, n_dynamic)
-                dyn_agg = dyn_part.sum(axis=0)  # shape: (n_dynamic,)
-                # Static part: slice out and squeeze to ensure 1D
+                dyn_part = sample[:self.seq_length * n_dynamic].reshape(self.seq_length, n_dynamic).sum(axis=0)
                 stat_part = sample[self.seq_length * n_dynamic:]
                 if stat_part.ndim > 1:
                     stat_part = np.squeeze(stat_part, axis=-1)
-                # Concatenate dynamic and static parts
-                combined = np.concatenate([dyn_agg, stat_part])
+                combined = np.concatenate([dyn_part, stat_part])
                 combined_samples.append(combined)
+                
             combined_samples = np.array(combined_samples)  # shape: [n_samples_basin, n_dynamic+n_static]
             # Compute median aggregation: both for signed and absolute values
             signed_agg = np.median(combined_samples, axis=0)
@@ -316,8 +314,8 @@ if __name__ == "__main__":
         inputs_path = os.path.join(analysis.results_folder, f"{fname_prefix2}.npz")
         if os.path.exists(shap_values_path) and os.path.exists(inputs_path):
             logging.info("Reusing existing SHAP files. Loading from disk...")
-            shap_values = np.load(shap_values_path)
-            inputs_data = np.load(inputs_path)
+            shap_values = np.load(shap_values_path, mmap_mode='r')
+            inputs_data = np.load(inputs_path, mmap_mode='r')
             basin_ids = inputs_data["basin_ids"]
         else:
             raise FileNotFoundError("Reuse flag set, but at least one of the SHAP files (values or inputs) is missing.")

@@ -34,8 +34,7 @@ class SHAPDataLoader:
         self.aggregated = None
         self.feature_names: List[str] = []
         self.basin_ids: List[str] = []
-        self.X_signed: Optional[np.ndarray] = None
-        self.X_absolute: Optional[np.ndarray] = None
+        self.X: Optional[np.ndarray] = None
 
     def load(self) -> None:
         """
@@ -52,8 +51,7 @@ class SHAPDataLoader:
         self.aggregated = data.get("aggregated", {})
         self.feature_names = data.get("feature_names", [])
         self.basin_ids = list(self.aggregated.keys())
-        self.X_signed = np.array([self.aggregated[bid]["signed"] for bid in self.basin_ids])
-        self.X_absolute = np.array([self.aggregated[bid]["absolute"] for bid in self.basin_ids])
+        self.X = np.array([self.aggregated[bid]["signed"] for bid in self.basin_ids])
 
     def get_data(self) -> Tuple[np.ndarray, np.ndarray, List[str], List[str]]:
         """
@@ -61,12 +59,11 @@ class SHAPDataLoader:
 
         Returns:
             Tuple[np.ndarray, np.ndarray, List[str], List[str]]:
-                - X_signed: Array of signed SHAP values.
-                - X_absolute: Array of absolute SHAP values.
+                - X: Array of signed SHAP values.
                 - feature_names: List of feature names.
                 - basin_ids: List of basin identifiers.
         """
-        return self.X_signed, self.X_absolute, self.feature_names, self.basin_ids
+        return self.X, self.feature_names, self.basin_ids
 
 class ClusterAnalyzer:
     """
@@ -85,8 +82,7 @@ class ClusterAnalyzer:
                  n_clusters: int, 
                  n_dim: int, 
                  clustering_method: str,
-                 apply_pca: bool = True,
-                 random_state: int = 42) -> None:
+                 apply_pca: bool = True) -> None:
         """
         Initializes the ClusterAnalyzer.
 
@@ -95,13 +91,11 @@ class ClusterAnalyzer:
             n_clusters (int): Default number of clusters (if applicable).
             n_dim (int): Number of PCA dimensions to reduce to.
             clustering_method (str, optional): Clustering algorithm to use.
-            random_state (int, optional): Seed for reproducibility. Defaults to 42.
         """
         self.X = X
         self.n_clusters = n_clusters
         self.n_dim = n_dim
         self.clustering_method = clustering_method.lower()
-        self.random_state = random_state
         self.apply_pca = apply_pca
 
         self.scaler = StandardScaler()
@@ -149,13 +143,13 @@ class ClusterAnalyzer:
                 n_clusters=self.n_clusters,
                 n_init=100,
                 max_iter=1000,
-                random_state=self.random_state,
+                random_state=42,
             )
             self.clusters = model.fit_predict(self.X_reduced)
         elif method == "gmm":
             model = GaussianMixture(
                 n_components=self.n_clusters,
-                random_state=self.random_state,
+                random_state=42,
             )
             model.fit(self.X_reduced)
             self.clusters = model.predict(self.X_reduced)
@@ -187,7 +181,7 @@ class ClusterAnalyzer:
                         n_clusters=k,
                         n_init=100,
                         max_iter=1000,
-                        random_state=self.random_state,
+                        random_state=42,
                     )
                     clusters = model.fit_predict(X_red)
                 elif self.clustering_method == "gmm":
@@ -195,7 +189,7 @@ class ClusterAnalyzer:
                         n_components=k,
                         max_iter=500,
                         n_init=10,
-                        random_state=self.random_state,
+                        random_state=42,
                     )
                     model.fit(X_red)
                     clusters = model.predict(X_red)
@@ -291,11 +285,11 @@ class ClusterAnalyzer:
 
         for k in results['n_values']:
             if self.clustering_method == "kmeans":
-                model = KMeans(n_clusters=k, n_init=100, max_iter=1000, random_state=self.random_state)
+                model = KMeans(n_clusters=k, n_init=100, max_iter=1000, random_state=42)
                 clusters = model.fit_predict(X_reduced)
                 inertia = model.inertia_
             elif self.clustering_method == "gmm":
-                model = GaussianMixture(n_components=k, random_state=self.random_state)
+                model = GaussianMixture(n_components=k, random_state=42)
                 model.fit(X_reduced)
                 clusters = model.predict(X_reduced)
                 inertia = np.nan  # Inertia is not defined for GMM
@@ -355,8 +349,7 @@ class ExtremeMedianClusterAnalysis:
                  median_n_clusters: int,
                  extreme_n_dim: int,
                  median_n_dim: int,
-                 clustering_method: str,
-                 random_state: int = 42) -> None:
+                 clustering_method: str) -> None:
         """
         Initializes the ExtremeMedianClusterAnalysis.
 
@@ -368,7 +361,6 @@ class ExtremeMedianClusterAnalysis:
             median_n_clusters (int): Number of clusters for median condition.
             extreme_n_dim (int): Number of PCA dimensions for extreme condition.
             median_n_dim (int): Number of PCA dimensions for median condition.
-            random_state (int, optional): Seed for reproducibility. Defaults to 42.
         """
         self.run_dir = run_dir
         self.epoch = epoch
@@ -378,7 +370,6 @@ class ExtremeMedianClusterAnalysis:
         self.extreme_n_dim = extreme_n_dim
         self.median_n_dim = median_n_dim
         self.clustering_method = clustering_method.lower()
-        self.random_state = random_state
         # Data loaders and analyzers for extreme and median conditions
         self.extreme_loader: Optional[SHAPDataLoader] = None
         self.median_loader: Optional[SHAPDataLoader] = None
@@ -475,14 +466,14 @@ class ExtremeMedianClusterAnalysis:
         if self.extreme_loader:
             extreme_data = np.array([self.extreme_loader.aggregated[bid]["signed"] for bid in self.common_basin_ids])
             self.extreme_analyzer = ClusterAnalyzer(extreme_data, self.extreme_n_clusters, self.extreme_n_dim,
-                                                    clustering_method=self.clustering_method, random_state=self.random_state)
+                                                    clustering_method=self.clustering_method)
             self.extreme_analyzer.normalize()
             self.extreme_analyzer.reduce_dimension()
         
         if self.median_loader:
             median_data = np.array([self.median_loader.aggregated[bid]["signed"] for bid in self.common_basin_ids])
             self.median_analyzer = ClusterAnalyzer(median_data, self.median_n_clusters, self.median_n_dim,
-                                                    clustering_method=self.clustering_method, random_state=self.random_state)
+                                                    clustering_method=self.clustering_method)
             self.median_analyzer.normalize()
             self.median_analyzer.reduce_dimension()
 
@@ -516,11 +507,30 @@ class ExtremeMedianClusterAnalysis:
             clusters (Dict[str, int]): Mapping of basin ID to cluster label.
             condition (str): Condition identifier ('extreme' or 'median').
         """
+        params = {
+            "extreme": {
+                "analyzer": self.extreme_analyzer,
+                "n_dim": self.extreme_n_dim,
+                "n_clusters": self.extreme_n_clusters,
+                "folder": self.extreme_folder
+            },
+            "median": {
+                "analyzer": self.median_analyzer,
+                "n_dim": self.median_n_dim,
+                "n_clusters": self.median_n_clusters,
+                "folder": self.median_folder
+            }
+        }[condition]
+
+        pca_dim = params["n_dim"] if params["analyzer"].apply_pca else "None"
+        title = f"{condition.capitalize()}, PCA Dim: {pca_dim}, Clusters: {params['n_clusters']}"
+
         plot_clusters_on_world_map(
             basins=self.common_basin_ids,
             cluster_dict=clusters,
             gauge_mapping=self.gauge_mapping,
-            output_dir=self.extreme_folder if condition == "extreme" else self.median_folder
+            output_dir=params["folder"],
+            title_details=title
         )
 
     def cluster_size_distribution(self, extreme_clusters: Dict[str, int], median_clusters: Dict[str, int]) -> None:
@@ -553,6 +563,62 @@ class ExtremeMedianClusterAnalysis:
         csv_path = os.path.join(self.results_folder, "cluster_sizes.csv")
         cluster_sizes.to_csv(csv_path, index=False)
 
+    def _aggregate_raw_data_per_basin(self, condition: str) -> dict:
+        """
+        Aggregates raw input data per basin.
+        
+        Args:
+            condition (str): Either 'extreme' or 'median' indicating the condition.
+            
+        Returns:
+            dict[str, np.ndarray]: Mapping from basin ID to aggregated raw data vector.
+        """
+        inputs = np.load(os.path.join(self.run_dir, self.period, f"model_epoch{self.epoch:03d}", "shap", f"inputs_{condition}.npz"))
+        x_d = inputs['x_d']              # shape: (n_samples, seq_length, n_dynamic)
+        x_s = inputs['x_s']              # shape: (n_samples, n_static)
+        basin_ids = inputs['basin_ids']  # shape: (n_samples,)
+        
+        # For dynamic data, take the last day's value for each sample.
+        last_day_dyn = x_d[:, -1, :]  # shape: (n_samples, n_dynamic)
+        combined = np.concatenate([last_day_dyn, x_s], axis=1)  # shape: (n_samples, n_dynamic+n_static)
+        
+        df = pd.DataFrame(combined)
+        df['basin_id'] = basin_ids
+        grouped = df.groupby('basin_id').median()
+        
+        aggregated_per_basin = {basin: row.values for basin, row in grouped.iterrows()}
+        return aggregated_per_basin
+
+    def aggregate_raw_data_per_cluster(self, condition, basin_to_cluster: dict[str, int]) -> dict:
+        """
+        Aggregates basin-level raw data into one representative vector per cluster.
+        The median is computed over all aggregated basin vectors within each cluster.
+        
+        Args:
+            condition (str): Either 'extreme' or 'median' indicating the condition.
+            basin_to_cluster (dict): Mapping from basin_id to cluster label.
+            
+        Returns:
+            dict: Mapping from cluster label to the aggregated raw data 
+            vector, with features as rows and clusters as columns.
+        """
+        aggregated_per_basin = self._aggregate_raw_data_per_basin(condition)
+        vectors = np.array([aggregated_per_basin[basin_id] for basin_id in self.common_basin_ids])
+        clusters = [basin_to_cluster[basin_id] for basin_id in self.common_basin_ids]
+        
+        df = pd.DataFrame(vectors)
+        df['cluster'] = clusters
+
+        grouped = df.groupby('cluster').median()
+
+        data_loader = self.extreme_loader if condition == "extreme" else self.median_loader
+        grouped.columns = data_loader.feature_names
+        df_transposed = grouped.T
+        output_file = os.path.join(self.extreme_folder if condition == "extreme" else self.median_folder, f"cluster_aggregated_raw_datd_{condition}.csv")
+        df_transposed.to_csv(output_file, index=True)
+        
+        return df_transposed
+
     def generate_cluster_visualizations(self, condition: str, analyzer: ClusterAnalyzer, loader: SHAPDataLoader, n_clusters: int) -> None:
         """
         Generates cluster visualization plots including scatter, bar, and radar plots for the specified condition.
@@ -563,11 +629,14 @@ class ExtremeMedianClusterAnalysis:
             loader (SHAPDataLoader): Data loader instance used to access SHAP data.
             n_clusters (int): Number of clusters used in the clustering.
         """
+        pca_dim = self.extreme_n_dim if condition == "extreme" else self.median_n_dim
+        pca_dim = pca_dim if analyzer.apply_pca else "None"
         X_reduced = analyzer.X_reduced
         clusters = analyzer.clusters
+
         plt.figure(figsize=(8, 6))
         scatter = plt.scatter(X_reduced[:, 0], X_reduced[:, 1], c=clusters, cmap="viridis", s=50, alpha=0.8)
-        plt.title(f"Clusters of (n={n_clusters}) Based on Aggregated SHAP Values ({condition.capitalize()})")
+        plt.title(f"Clustered Basins ({condition.capitalize()}, PCA Dim: {pca_dim}, Clusters: {n_clusters})")
         plt.xlabel("Principal Component 1")
         plt.ylabel("Principal Component 2")
         plt.colorbar(scatter, label="Cluster")
@@ -584,10 +653,23 @@ class ExtremeMedianClusterAnalysis:
             profiles_abs = [loader.aggregated[bid]["absolute"] for bid in basin_ids]
             median_profile = np.median(np.array(profiles), axis=0)
             median_profile_abs = np.median(np.array(profiles_abs), axis=0)
-            self._generate_bar_plot(condition, loader, cluster, median_profile, median_profile_abs)
-            self._generate_radar_plot(condition, loader, cluster, median_profile)
+            self._generate_bar_plot(
+                condition=condition,
+                loader=loader,
+                cluster=cluster + 1,
+                median_profile=median_profile,
+                median_profile_abs=median_profile_abs,
+                pca_dim=pca_dim,
+            )
+            self._generate_radar_plot(
+                condition=condition,
+                loader=loader,
+                cluster=cluster + 1,
+                median_profile=median_profile,
+                pca_dim=pca_dim,
+            )
 
-    def _generate_radar_plot(self, condition, loader, cluster, median_profile):
+    def _generate_radar_plot(self, condition: str, loader: SHAPDataLoader, cluster: int, median_profile: np.ndarray, pca_dim: int) -> None:
         """
         Generates a radar plot for a specific cluster.
 
@@ -607,12 +689,13 @@ class ExtremeMedianClusterAnalysis:
         plt.xticks(angles[:-1], loader.feature_names, fontsize=6)
         ax.plot(angles, values, color='b', linewidth=2)
         ax.fill(angles, values, color='b', alpha=0.25)
-        plt.title(f"Cluster {cluster} Aggregated Feature Profile ({condition})", y=1.08)
+        plt.title(f"Cluster {cluster} Aggregated Feature Profile ({condition.capitalize()}, PCA Dim: {pca_dim})", y=1.08)
         plt.tight_layout()
         plt.savefig(os.path.join(self.extreme_folder if condition == "extreme" else self.median_folder, f"cluster_{cluster}_radar_plot.png"), dpi=300)
         plt.close()
 
-    def _generate_bar_plot(self, condition, loader, cluster, median_profile, median_profile_abs):
+    def _generate_bar_plot(self, condition: str, loader: SHAPDataLoader, cluster: int, median_profile: np.ndarray,
+                            median_profile_abs: np.ndarray, pca_dim: int) -> None:
         """
         Generates a horizontal bar plot for a specific cluster.
 
@@ -631,8 +714,8 @@ class ExtremeMedianClusterAnalysis:
         plt.barh(y + bar_height/2, median_profile_abs, height=bar_height, color='salmon', alpha=0.3, label='Absolute Median')
         plt.yticks(y, loader.feature_names, fontsize=6)
         plt.gca().invert_yaxis()
-        plt.xlabel("Aggregated SHAP Value")
-        plt.title(f"Cluster {cluster} Aggregated Feature Profile ({condition})", fontsize=12)
+        plt.xlabel("Aggregated SHAP Value")        
+        plt.title(f"Cluster {cluster} Aggregated Feature Profile ({condition.capitalize()}, PCA Dim: {pca_dim})", fontsize=12)
         plt.legend(loc='lower right')
         plt.tight_layout()
         plt.savefig(os.path.join(self.extreme_folder if condition == "extreme" else self.median_folder, f"cluster_{cluster}_bar_plot.png"), dpi=300)
@@ -853,12 +936,13 @@ class ExtremeMedianClusterAnalysis:
         self.load_gauge_mapping()
         self.setup_analyzers()
         extreme_clusters, median_clusters = self.run_clustering()
-        
-        # Run visualizations for the available condition(s)
+
         if self.extreme_loader:
+            self.aggregate_raw_data_per_cluster("extreme", extreme_clusters)
             self.generate_cluster_visualizations("extreme", self.extreme_analyzer, self.extreme_loader, self.extreme_n_clusters)
             self.plot_geographic_clusters(extreme_clusters, "extreme")
         if self.median_loader:
+            self.aggregate_raw_data_per_cluster("median", median_clusters)
             self.generate_cluster_visualizations("median", self.median_analyzer, self.median_loader, self.median_n_clusters)
             self.plot_geographic_clusters(median_clusters, "median")
         
@@ -869,7 +953,7 @@ class ExtremeMedianClusterAnalysis:
             self.plot_transition_matrices(transition_matrix)
             self.plot_sankey_diagram(transition_matrix)
             self.calculate_feature_shifts(extreme_clusters, median_clusters)
-            self.plot_top_feature_shifts()
+            # self.plot_top_feature_shifts()
             self.calculate_cluster_stability(extreme_clusters, median_clusters)
             logging.info(f"Comparative analysis completed. Results saved in: {self.results_folder}")
         else:
@@ -888,7 +972,6 @@ class OptimalParameterSearch:
                  period: str, 
                  clustering_method: str,
                  filter_type: str,
-                 random_state: int = 42, 
                  components_range: Tuple[int, int] = (2, 66),
                  clusters_range: Tuple[int, int] = (2, 16)) -> None:
         """
@@ -899,7 +982,6 @@ class OptimalParameterSearch:
             epoch (int): Epoch number for model selection.
             period (str): Period identifier (e.g., train, validation, test).
             filter_type (str): Condition filter type ('extreme' or 'median').
-            random_state (int, optional): Seed for reproducibility. Defaults to 42.
             components_range (Tuple[int, int], optional): Range (min, max) for PCA components. Defaults to (2, 66).
             clusters_range (Tuple[int, int], optional): Range (min, max) for number of clusters. Defaults to (2, 16).
         """
@@ -908,7 +990,6 @@ class OptimalParameterSearch:
         self.period = period
         self.filter_type = filter_type.lower()
         self.clustering_method = clustering_method.lower()
-        self.random_state = random_state
         self.components_range = np.arange(*components_range)
         self.clusters_range = np.arange(*clusters_range)
         self.results_folder = os.path.join(
@@ -960,15 +1041,15 @@ class OptimalParameterSearch:
         Runs the complete optimal parameter analysis pipeline.
         """
         self.load_data()
-        X_signed, _, _, _ = self.data_loader.get_data()
-        self.cluster_analyzer = ClusterAnalyzer(X_signed, n_clusters=3, n_dim=3, clustering_method=self.clustering_method, random_state=self.random_state)
+        X, _, _ = self.data_loader.get_data()
+        self.cluster_analyzer = ClusterAnalyzer(X, n_clusters=3, n_dim=3, clustering_method=self.clustering_method)
         self.cluster_analyzer.normalize()
         # Run grid search first
         # self.run_grid_search()
         # Run optimal dimensions analysis
         # dim_results = self.cluster_analyzer.find_optimal_dimensions(self.results_folder)
         # optimal_components = dim_results['n_components_90']
-        self.cluster_analyzer.find_optimal_clusters(self.results_folder, n_components=3)
+        self.cluster_analyzer.find_optimal_clusters(self.results_folder, n_components=7)
 
 def parse_args():
     """
