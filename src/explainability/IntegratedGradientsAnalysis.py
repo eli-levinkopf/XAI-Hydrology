@@ -85,15 +85,15 @@ class IntegratedGradientsAnalysis(ExplainabilityBase):
         
         Returns:
             ig_values (np.ndarray): The computed IG values of shape [n_samples, n_features].
-            final_inputs (dict): {"x_d": final_x_d, "x_s": final_x_s}
+            final_inputs (dict): {"x_d": np.ndarray, "x_s": np.ndarray}
         """
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(device)
 
-        final_x_d, final_x_s, _ = self.load_and_sample_inputs()
+        x_d, x_s, _ = self.load_and_sample_inputs()
         combined_inputs = np.hstack([
-            final_x_d.reshape(len(final_x_d), -1),
-            final_x_s
+            x_d.reshape(len(x_d), -1),
+            x_s
         ])
         combined_inputs_tensor = torch.tensor(combined_inputs, dtype=torch.float32).to(device)
 
@@ -125,12 +125,11 @@ class IntegratedGradientsAnalysis(ExplainabilityBase):
 
         ig_values = np.concatenate(ig_batches, axis=0)
 
-        # Save results
         np.save(os.path.join(self.results_folder, "ig_values.npy"), ig_values)
-        np.savez(os.path.join(self.results_folder, "ig_inputs.npz"), x_d=final_x_d, x_s=final_x_s)
+        np.savez(os.path.join(self.results_folder, "ig_inputs.npz"), x_d=x_d, x_s=x_s)
 
         torch.cuda.empty_cache()
-        return ig_values, {"x_d": final_x_d, "x_s": final_x_s}
+        return ig_values, {"x_d": x_d, "x_s": x_s}
 
     def _sum_ig_dynamic_over_time(self, ig_dyn: np.ndarray) -> np.ndarray:
         """
@@ -141,7 +140,7 @@ class IntegratedGradientsAnalysis(ExplainabilityBase):
         n_samples = ig_dyn.shape[0]
         num_dynamic = len(self.dynamic_features)
         ig_dyn_reshaped = ig_dyn.reshape(n_samples, self.seq_length, num_dynamic)
-        return ig_dyn_reshaped.sum(axis=1)  # sum over seq_length
+        return ig_dyn_reshaped.sum(axis=1)
 
     def _plot_ig_bar(self, ig_values: np.ndarray, feature_names: list, title: str, use_abs: bool, dynamic_count: int
     ) -> None:
@@ -173,12 +172,12 @@ class IntegratedGradientsAnalysis(ExplainabilityBase):
         # Assign colors based on dynamic vs. static
         colors = ['skyblue' if i < dynamic_count else 'blue' for i in sorted_idx]
 
-        plt.figure(figsize=(8, 6))
-        plt.barh(range(len(sorted_scores)), sorted_scores, color=colors)
-        plt.yticks(range(len(sorted_scores)), sorted_feature_names)
+        plt.figure(figsize=(10, 12))
+        plt.barh(sorted_feature_names, sorted_scores, color=colors)
+        # plt.yticks(range(len(sorted_scores)), sorted_feature_names)
         plt.xlabel(x_label)
         plt.title(title)
-        plt.tight_layout()
+        # plt.tight_layout()
         plt.gca().invert_yaxis()
 
         dynamic_patch = mpatches.Patch(color='skyblue', label='Dynamic Features')
@@ -193,24 +192,20 @@ class IntegratedGradientsAnalysis(ExplainabilityBase):
     def run_ig_visualizations(self, ig_values: np.ndarray, inputs: dict[str, np.ndarray]) -> None:
         """
         Produce an overall bar chart of dynamic + static feature contributions.
-        1) Separate dynamic vs. static
-        2) Sum dynamic IG across time
-        3) Aggregate static features
-        4) Plot bar charts
+
+        Args:
+            ig_values (np.ndarray): Integrated Gradients values of shape [n_samples, n_features].
+            inputs (dict): {"x_d": np.ndarray, "x_s": np.ndarray}
         """
         num_dyn_features = len(self.dynamic_features)
         ig_dyn = ig_values[:, : self.seq_length * num_dyn_features]
         ig_stat = ig_values[:, self.seq_length * num_dyn_features :]
 
         # Sum dynamic across time
-        summed_ig_dyn = self._sum_ig_dynamic_over_time(ig_dyn)
+        ig_dyn = self._sum_ig_dynamic_over_time(ig_dyn)
 
-        # Aggregate static
-        aggregated_ig_stat, agg_stat_names = self._aggregate_static_features(ig_stat)
-
-        # Combine
-        combined_ig = np.hstack([summed_ig_dyn, aggregated_ig_stat])
-        combined_feature_names = self.dynamic_features + agg_stat_names
+        combined_ig = np.hstack([ig_dyn, ig_stat])
+        combined_feature_names = self.dynamic_features + self.static_features
 
         # Plot bar chart of mean absolute IG
         self._plot_ig_bar(

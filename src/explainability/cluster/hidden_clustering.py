@@ -1,10 +1,13 @@
+import logging
 import os
+from sklearn.metrics import calinski_harabasz_score, davies_bouldin_score, silhouette_score
 import torch
 import numpy as np
 from sklearn.cluster import KMeans
 import matplotlib.pyplot as plt
 import umap
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional
+from tqdm import tqdm
 
 from model.model_analyzer import ModelAnalyzer
 
@@ -17,7 +20,7 @@ class HiddenStateClusterer:
     def __init__(
         self, 
         analyzer: ModelAnalyzer,
-        n_clusters: int = 5,
+        n_clusters: int = 10,
         random_state: int = 42
     ) -> None:
         """
@@ -82,12 +85,12 @@ class HiddenStateClusterer:
         self.embedding = reducer.fit_transform(hidden_np)
         return self.embedding
     
-    def plot_clusters(self, save_path: Optional[str] = None) -> None:
+    def plot_clusters(self, output_path: Optional[str] = None) -> None:
         """
         Plot the clusters in a 2D space using UMAP-reduced hidden states.
         
         Args:
-            save_path (Optional[str], optional): Path to save the plot. 
+            output_path (Optional[str], optional): Path to save the plot. 
                 If None, saves to run_dir. Defaults to None.
         """  
         plt.figure(figsize=(10, 8))
@@ -103,9 +106,101 @@ class HiddenStateClusterer:
         plt.xlabel("UMAP Dimension 1")
         plt.ylabel("UMAP Dimension 2")
         
-        if save_path is None:
-            save_path = os.path.join(str(self.run_dir), "hidden_state_clusters.png")
+        if output_path is None:
+            output_path = os.path.join(str(self.run_dir), "hidden_state_clusters.png")
         
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
 
+    def evaluate(self, k_min: int = 10, k_max: int = 50, output_path: Optional[str] = None) -> Dict[int, Dict[str, Any]]:
+        """
+        Evaluate clustering metrics over a range of k values. Computes the inertia, silhouette score,
+        Calinski-Harabasz Index, and Davies-Bouldin Index for each k, then plots all metrics.
+        
+        Args:
+            k_min (int, optional): Minimum number of clusters (must be at least 2). Defaults to 10.
+            k_max (int, optional): Maximum number of clusters. Defaults to 50.
+            output_path (Optional[str], optional): Path to save the multi-panel plot.
+                If None, saves to run_dir.
+                
+        Returns:
+            Dict[int, Dict[str, Any]]: A dictionary mapping each k to its metrics.
+                For each k, the metrics include:
+                - 'inertia'
+                - 'silhouette'
+                - 'calinski_harabasz'
+                - 'davies_bouldin'
+        """
+        if self.hidden_states is None:
+            self.extract_hidden_states()
+        
+        hidden_np = self.hidden_states.numpy()
+        ks = list(range(k_min, k_max + 1, 2))
+        inertias = []
+        silhouette_scores = []
+        calinski_scores = []
+        davies_scores = []
+        # for k in tqdm(ks, desc="Evaluating Clustering Metrics"):
+        for k in ks:
+            logging.info(f"Starting clustering for k={k}")
+            logging.info("Initializing KMeans...")
+            kmeans = KMeans(
+                n_clusters=k, 
+                random_state=self.random_state, 
+                n_init=10
+                )
+            logging.info("Fitting KMeans...")
+            labels = kmeans.fit_predict(hidden_np)
+            logging.info("Calculating inertia...")
+            inertias.append(kmeans.inertia_)
+            logging.info("Calculating silhouette score...")
+            silhouette_val = silhouette_score(hidden_np, labels, sample_size=80000, random_state=self.random_state)
+            silhouette_scores.append(silhouette_val)
+            logging.info("Calculating Calinski-Harabasz score...")
+            calinski_val = calinski_harabasz_score(hidden_np, labels)
+            calinski_scores.append(calinski_val)
+            logging.info("Calculating Davies-Bouldin score...")
+            davies_val = davies_bouldin_score(hidden_np, labels)
+            davies_scores.append(davies_val)
+            logging.info(f"Finished clustering for k={k}")
+        
+        fig, axs = plt.subplots(2, 2, figsize=(12, 10))
+        
+        axs[0, 0].plot(ks, inertias, 'bo-')
+        axs[0, 0].set_title("Elbow Method")
+        axs[0, 0].set_xlabel("Number of Clusters")
+        axs[0, 0].set_ylabel("Inertia (WCSS)")
+        
+        axs[0, 1].plot(ks, silhouette_scores, 'ro-')
+        axs[0, 1].set_title('Silhouette Score (higher is better)')
+        axs[0, 1].set_xlabel("Number of Clusters")
+        axs[0, 1].set_ylabel('Silhouette Score')
+        
+        axs[1, 0].plot(ks, calinski_scores, 'go-')
+        axs[1, 0].set_title("Calinski-Harabasz Score (higher is better)")
+        axs[1, 0].set_xlabel("Number of Clusters")
+        axs[1, 0].set_ylabel("Calinski-Harabasz Score")
+        
+        axs[1, 1].plot(ks, davies_scores, 'mo-')
+        axs[1, 1].set_ylabel('Davies-Bouldin Score')
+        axs[1, 1].set_xlabel("Number of Clusters")
+        axs[1, 1].set_title('Davies-Bouldin Index (lower is better)')
+
+        
+        plt.tight_layout()
+        if output_path is None:
+            output_path = os.path.join(str(self.run_dir), "evaluation_metrics_range.png")
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        # Assemble metrics into a dictionary
+        metrics_dict = {}
+        for i, k in enumerate(ks):
+            metrics_dict[k] = {
+                'inertia': inertias[i],
+                'silhouette': silhouette_scores[i],
+                'calinski_harabasz': calinski_scores[i],
+                'davies_bouldin': davies_scores[i]
+            }
+        
+        return metrics_dict

@@ -35,14 +35,15 @@ class ExplainabilityBase:
         self.analysis_name = analysis_name
         self.period = period.lower()
 
-        self.cfg = self._load_config()
-        self.seq_length = self.cfg["seq_length"]
-        self.dynamic_features = self.cfg["dynamic_inputs"]
-        self.static_features = self.cfg["static_attributes"]
+        # self.cfg = self._load_config()
+        self.cfg = Config(Path(run_dir) / "config.yml")
+        self.seq_length = self.cfg.seq_length
+        self.dynamic_features = self.cfg.dynamic_inputs
+        self.static_features = self.cfg.static_attributes
 
         self.model = self._load_model()
         self.results_folder = self._setup_results_folder()
-
+        
         self.model_analyzer = ModelAnalyzer(run_dir=Path(self.run_dir), epoch=self.epoch, period=self.period)
 
     def _load_config(self) -> dict[str, Any]:
@@ -60,10 +61,10 @@ class ExplainabilityBase:
         Returns:
             nn.Module: The loaded model in eval mode on the appropriate device.
         """
-        config = Config(self.cfg)
-        model_class_name = config.model.lower()
+        # config = Config(self.cfg)
+        model_class_name = self.cfg.model.lower()
         if model_class_name == 'cudalstm':
-            model = CudaLSTM(cfg=config)
+            model = CudaLSTM(cfg=self.cfg)
         else:
             raise ValueError(f"Model '{model_class_name}' is not supported by this script.")
 
@@ -272,6 +273,7 @@ class ExplainabilityBase:
         """
         inputs = self.model_analyzer.get_inputs()
         x_d, x_s = inputs["x_d"], inputs["x_s"]
+        logging.info(f"Before sampling: x_d shape {x_d.shape}, x_s shape {x_s.shape}") # Debugging
         total_samples = x_d.shape[0]
         if self.num_samples < total_samples:
             indices = np.random.choice(total_samples, size=self.num_samples, replace=False)
@@ -281,6 +283,7 @@ class ExplainabilityBase:
             final_x_d = x_d
             final_x_s = x_s
             indices = np.arange(total_samples)
+        logging.info(f"After sampling: final_x_d shape {final_x_d.shape}, final_x_s shape {final_x_s.shape}") # Debugging
         return final_x_d, final_x_s, indices
     
     def _aggregate_static_features(self, values: np.ndarray, x_s: np.ndarray = None) -> tuple[np.ndarray, np.ndarray, list[str]]:

@@ -19,7 +19,8 @@ class BaseModelLoader:
     def _load_model(self) -> CudaLSTM:
         model = CudaLSTM(cfg=self.cfg)
         model_path = self.run_dir / f"model_epoch{self.epoch:03d}.pt"
-        model_weights = torch.load(str(model_path), map_location=self.cfg.device, weights_only=True)
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model_weights = torch.load(str(model_path), map_location=device, weights_only=True)
         model.load_state_dict(model_weights)
         model.eval()
-        return model.to(self.cfg.device)
+        return model.to(device)

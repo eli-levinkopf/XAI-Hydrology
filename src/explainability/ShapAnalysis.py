@@ -10,12 +10,10 @@ import shap
 import logging
 from torch import Tensor, nn
 from pathlib import Path
-import matplotlib.cm as cm
-from itertools import cycle
-
-torch.backends.cudnn.enabled = False
 
 from ExplainabilityBase import ExplainabilityBase 
+
+torch.backends.cudnn.enabled = False
 
 BACKGROUND_SIZE = 1024
 BATCH_SIZE = 256
@@ -36,170 +34,224 @@ class SHAPAnalysis(ExplainabilityBase):
         super().__init__(run_dir, epoch, num_samples, analysis_name="shap", period=period)
         self.use_embedding = use_embedding
 
-    def _get_embedding_outputs(self, final_x_d: np.ndarray, final_x_s: np.ndarray) -> np.ndarray:
+    def _get_embedding_outputs(self, x_d: np.ndarray, x_s: np.ndarray) -> np.ndarray:
         """
-        Run a forward pass with a hook on the embedding network (embedding_net) in batches to extract 
-        the embedding outputs for each sample. Then, process the raw output to obtain a 
-        flattened representation.
-
-        Expected raw output from embedding_net: [seq_length, num_samples, dynamic_emb_dim + static_emb_dim],
-        where:
-          - the first dynamic_emb_dim features come from the dynamic embedding (one per time step)
-          - the next static_emb_dim features come from the static embedding (repeated over time)
-
-        We convert this into a flattened representation of shape:
-          [num_samples, (seq_length * dynamic_emb_dim) + static_emb_dim]
-
-       Args:
-            final_x_d: Dynamic input features
-            final_x_s: Static input features
+        Run a forward pass with a hook on the embedding network (embedding_net) to extract
+        the embedding outputs for each sample and then produce a flattened representation.
+        
+        Memory-optimized version that processes batches without storing all intermediate outputs.
+        
+        Args:
+            x_d: Dynamic input features (np.ndarray of shape [num_samples, seq_length, n_dynamic])
+            x_s: Static input features (np.ndarray of shape [num_samples, n_static])
         
         Returns:
             np.ndarray: Final flattened embedding representation.
         """
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        # Recombine inputs as in run_shap:
-        combined_inputs = np.hstack([
-            final_x_d.reshape(len(final_x_d), -1),
-            final_x_s
-        ])
-        combined_inputs_tensor = torch.tensor(combined_inputs, dtype=torch.float32).to(device)
-        
-        num_dynamic = len(self.dynamic_features)
-        seq_length = self.seq_length
-        x_d_flat = combined_inputs_tensor[:, : seq_length * num_dynamic]
-        x_s = combined_inputs_tensor[:, seq_length * num_dynamic:]
-        x_d = x_d_flat.view(-1, seq_length, num_dynamic)
-
-        # Prepare to collect embedding outputs from each batch
-        embedding_outputs_list = []
-
-        def hook_fn(module: nn.Module, input: Tuple[Tensor], output: Tensor) -> Tensor:
-            # Append the output from this batch
-            embedding_outputs_list.append(output.detach())
-            return output
-
-        # Attach hook to the embedding_net
-        hook_handle = self.model.embedding_net.register_forward_hook(hook_fn)
-
-        # Process the inputs in batches to avoid a huge allocation
         num_samples = x_d.shape[0]
-        for i in range(0, num_samples, BATCH_SIZE):
-            batch_x_d = x_d[i: i + BATCH_SIZE]
-            batch_x_s = x_s[i: i + BATCH_SIZE]
-            inputs = {"x_d": batch_x_d, "x_s": batch_x_s}
-            with torch.no_grad():
-                _ = self.model(inputs)
-            # Optionally clear the cache after each batch:
-            torch.cuda.empty_cache()
+        n_dynamic = len(self.dynamic_features)
+        
+        dynamic_embedding = self.cfg.dynamics_embedding
+        static_embedding = self.cfg.statics_embedding
+        dyn_emb_out_dim = dynamic_embedding["hiddens"][-1] if dynamic_embedding and dynamic_embedding.get("hiddens") else -1
+        stat_emb_out_dim = static_embedding["hiddens"][-1] if static_embedding and static_embedding.get("hiddens") else -1
+        
+        # Preallocate the final output array to avoid memory spikes
+        if dyn_emb_out_dim > 0:
+            final_dim = (self.seq_length * dyn_emb_out_dim) + stat_emb_out_dim
+        else:
+            final_dim = (self.seq_length * n_dynamic) + stat_emb_out_dim
+            
+        final_outputs = np.zeros((num_samples, final_dim), dtype=np.float32)
+        
+        if dyn_emb_out_dim > 0:
+            # --- Model with both dynamic and static embeddings ---
+            # Process in batches
+            for i in range(0, num_samples, BATCH_SIZE):
+                batch_end = min(i + BATCH_SIZE, num_samples)
+                batch_size = batch_end - i
 
-        hook_handle.remove()
+                batch_x_d = torch.tensor(x_d[i:batch_end], dtype=torch.float32).to(device)
+                batch_x_s = torch.tensor(x_s[i:batch_end], dtype=torch.float32).to(device)
+                embedding_outputs_list = []
+                
+                def hook_fn(module: nn.Module, input: Tuple[Tensor], output: Tensor) -> Tensor:
+                    embedding_outputs_list.append(output.detach().cpu())
+                    return output
+                    
+                hook_handle = self.model.embedding_net.register_forward_hook(hook_fn)
+                
+                inputs = {"x_d": batch_x_d, "x_s": batch_x_s}
+                with torch.no_grad():
+                    _ = self.model(inputs)
+                    
+                hook_handle.remove()
+                
+                # Process the collected embeddings for this batch
+                combined_embedding = torch.cat(embedding_outputs_list, dim=1)
+                # Permute to [batch_size, seq_length, emb_dim]
+                emb_out = combined_embedding.permute(1, 0, 2)
+                
+                # Split into dynamic and static parts
+                dynamic_emb = emb_out[:, :, :dyn_emb_out_dim]    # [batch_size, seq_length, dyn_emb_out_dim]
+                static_emb = emb_out[:, 0, dyn_emb_out_dim:]     # [batch_size, stat_emb_out_dim]
+                
+                dynamic_flat = dynamic_emb.reshape(batch_size, -1)
+                batch_final_emb = torch.cat([dynamic_flat, static_emb], dim=1).numpy()
+                
+                # Store directly in the preallocated array
+                final_outputs[i:batch_end] = batch_final_emb
+                
+                # Clear memory
+                del batch_x_d, batch_x_s, combined_embedding, emb_out, dynamic_emb, static_emb, dynamic_flat, batch_final_emb
+                embedding_outputs_list.clear()
+                torch.cuda.empty_cache()
+                
+        else:
+            # --- Model with only static embedding ---
+            # In this case, the model does not embed x_d. The static branch processes x_s.
+            # We still pass both x_d and x_s to the model, but use a dummy for x_d in the embedding branch.
+            # Meanwhile, we want to preserve the original x_d (flattened) for the final representation.
+            x_d_flat = x_d.reshape(num_samples, -1)  # Raw dynamic input, flattened
 
-        # Each element in embedding_outputs_list is of shape: [seq_length, batch, emb_dim]
-        # Concatenate along the batch dimension (dim=1)
-        combined_embedding = torch.cat(embedding_outputs_list, dim=1)
+            for i in range(0, num_samples, BATCH_SIZE):
+                batch_end = min(i + BATCH_SIZE, num_samples)
+                batch_size_actual = batch_end - i
+                dummy_x_d = torch.zeros(batch_size_actual, self.seq_length, n_dynamic, device=device)
+                batch_x_s = torch.tensor(x_s[i: i + batch_size_actual], dtype=torch.float32, device=device)
+                embedding_outputs_list = []
+                
+                def hook_fn(module: nn.Module, input: Tuple[Tensor], output: Tensor) -> Tensor:
+                    embedding_outputs_list.append(output.detach().cpu())
+                    return output
+                    
+                hook_handle = self.model.embedding_net.register_forward_hook(hook_fn)
+                
+                inputs = {"x_d": dummy_x_d, "x_s": batch_x_s}
+                with torch.no_grad():
+                    _ = self.model(inputs)
+                    
+                hook_handle.remove()
+                
+                # Process the collected embeddings for this batch
+                combined_embedding = torch.cat(embedding_outputs_list, dim=0)  # shape: [T, batch, total_emb_dim]
+                if combined_embedding.dim() == 3:
+                    # combined_embedding is [T, batch, total_emb_dim] where total_emb_dim = dyn_emb_out_dim + stat_emb_out_dim
+                    full_static = combined_embedding[0]  # take the first time step, shape: [batch, 46]
+                    dyn_emb_out_dim = len(self.dynamic_features)
+                    # Extract only the static portion: expected shape [batch, 32]
+                    static_emb = full_static[:, dyn_emb_out_dim:]
+                else:
+                    static_emb = combined_embedding
+                    
+                batch_x_d_flat = torch.tensor(x_d_flat[i:batch_end], dtype=torch.float32)
+                batch_final_emb = torch.cat([batch_x_d_flat, static_emb], dim=1).numpy()
 
-        # Process the combined embeddings
-        emb_out = combined_embedding.cpu()
-        logging.info(f"Captured raw embedding output shape: {emb_out.shape}")
+                final_outputs[i:batch_end] = batch_final_emb
+                
+                # Clear memory
+                del dummy_x_d, batch_x_s, static_emb, batch_x_d_flat, batch_final_emb
+                embedding_outputs_list.clear()
+                torch.cuda.empty_cache()
 
-        # Permute to shape [num_samples, seq_length, emb_dim]
-        emb_out = emb_out.permute(1, 0, 2)
-        logging.info(f"After permuting, embedding shape: {emb_out.shape}")
+        logging.info(f"Final embedding representation shape: {final_outputs.shape}")
+        return final_outputs
 
-        # Retrieve embedding dimensions from the model configuration
-        dyn_emb_dim = self.model.embedding_net.dynamics_output_size
-        stat_emb_dim = self.model.embedding_net.statics_output_size
-
-        # Split dynamic and static parts:
-        dynamic_emb = emb_out[:, :, :dyn_emb_dim]    # shape: [num_samples, seq_length, dyn_emb_dim]
-        static_emb = emb_out[:, 0, dyn_emb_dim:]     # shape: [num_samples, stat_emb_dim]
-        logging.info(f"Dynamic part shape: {dynamic_emb.shape}, Static part shape: {static_emb.shape}")
-
-        # Flatten the dynamic part over time: [num_samples, seq_length * dyn_emb_dim]
-        dynamic_flat = dynamic_emb.reshape(dynamic_emb.shape[0], -1)
-        logging.info(f"Flattened dynamic part shape: {dynamic_flat.shape}")
-
-        # Concatenate to get final embedding representation: [num_samples, (seq_length * dyn_emb_dim) + stat_emb_dim]
-        final_emb = torch.cat([dynamic_flat, static_emb], dim=1)
-        logging.info(f"Final embedding representation shape: {final_emb.shape}")
-        logging.debug(f"Sample final embedding values (first 2 samples): {final_emb[:2].numpy()}")
-    
-        return final_emb.numpy()
-
-    def _wrap_model_embedding(self)-> nn.Module:
+    def _wrap_model_embedding(self) -> nn.Module:
         """
         Create a wrapped model that accepts the flattened embedding output as input and maps 
-        it to the final prediction. We override the embedding network's output using a hook.
+        it to the final prediction. This wrapped model “reconstructs” an input for the downstream
+        network by reversing the flattening applied during SHAP extraction.
         
-        Since the rest of the model (e.g., the LSTM) expects the embedding_net output to be of shape
-        [seq_length, batch, (dyn_emb_dim + stat_emb_dim)], we need to reverse the flattening transformation:
-          - Split the flattened input into a dynamic part of shape [batch, seq_length, dyn_emb_dim] and 
-            a static part of shape [batch, stat_emb_dim].
-          - Replicate the static part along the time dimension and concatenate with the dynamic part.
-          - Permute the result to get [seq_length, batch, (dyn_emb_dim + stat_emb_dim)].
+        For models with both dynamic and static embeddings:
+        - The flattened input is of shape [batch, (seq_length * dyn_emb_out_dim) + stat_emb_out_dim].
+        - It is split into a dynamic part (reshaped to [batch, seq_length, dyn_emb_out_dim]) and a 
+            static part (of shape [batch, stat_emb_out_dim]), with the static part repeated along the time axis.
+        
+        For models with only a static embedding:
+        - The flattened input is of shape [batch, (seq_length * num_dynamic) + stat_emb_out_dim],
+            where the first part (which would be the raw dynamic input) is ignored.
+        - Only the static embedding is used. It is repeated along the time axis so that the 
+            downstream network (which expects a time dimension) receives an input of shape 
+            [seq_length, batch, stat_emb_out_dim].
         
         Returns:
-            nn.Module: Wrapped model that takes an input of shape [batch, flattened_dim].
+            nn.Module: A wrapped model that takes an input of shape [batch, flattened_dim] and returns 
+                    a final prediction of shape [batch, 1].
         """
         class WrappedModelEmbedding(nn.Module):
-            def __init__(self, original_model: nn.Module, seq_length: int, num_dynamic: int, num_static: int) -> None:
+            def __init__(self, original_model: nn.Module, cfg) -> None:
                 super().__init__()
                 self.original_model = original_model
-                self.seq_length = seq_length
-                self.num_dynamic = num_dynamic    # original number of dynamic features (used only for dummy inputs)
-                self.num_static = num_static      # original number of static features (used only for dummy inputs)
-                self.dyn_emb_dim = self.original_model.embedding_net.dynamics_output_size
-                self.stat_emb_dim = self.original_model.embedding_net.statics_output_size
+                self.cfg = cfg
+                self.num_dynamic = len(self.cfg.dynamic_inputs)  # Number of dynamic (raw) features
+                self.num_static = len(self.cfg.static_attributes)    # Number of static (raw) features
+
+                dynamic_embedding = self.cfg.dynamics_embedding
+                static_embedding = self.cfg.statics_embedding
+                self.dyn_emb_out_dim = dynamic_embedding["hiddens"][-1] if dynamic_embedding and dynamic_embedding.get("hiddens") else -1
+                self.stat_emb_out_dim = static_embedding["hiddens"][-1] if static_embedding and static_embedding.get("hiddens") else -1
 
             def forward(self, embedding_input: Tensor) -> Tensor:
                 """
+                Reconstruct the embedding input into the shape expected by the downstream network.
+                
                 Args:
-                    embedding_input (Tensor): Tensor of shape [batch, flattened_dim],
-                      where flattened_dim = (seq_length * dyn_emb_dim) + stat_emb_dim.
+                    embedding_input (Tensor): Flattened embedding representation.
+                    - For both-embedding models: shape [batch, (seq_length * dyn_emb_out_dim) + stat_emb_out_dim].
+                    - For static-only models: shape [batch, (seq_length * num_dynamic) + stat_emb_out_dim].
+                
                 Returns:
                     Tensor: Final prediction of shape [batch, 1].
                 """
                 batch_size = embedding_input.size(0)
-                seq_length = self.seq_length
+                seq_length = self.cfg.seq_length
 
-                # Split dynamic vs static
-                dynamic_flat = embedding_input[:, :seq_length * self.dyn_emb_dim] # [batch, seq_length * dyn_emb_dim]
-                static_part = embedding_input[:, seq_length * self.dyn_emb_dim:] #[batch, stat_emb_dim]
+                if self.dyn_emb_out_dim > 0:
+                    # --- Model with both dynamic and static embeddings ---
+                    dynamic_flat = embedding_input[:, :seq_length * self.dyn_emb_out_dim]  # [batch, seq_length * dyn_emb_out_dim]
+                    static_part = embedding_input[:, seq_length * self.dyn_emb_out_dim:]    # [batch, stat_emb_out_dim]
 
-                # Reshape dynamic => [batch, seq_length, dyn_emb_dim]
-                dynamic_emb = dynamic_flat.reshape(batch_size, seq_length, self.dyn_emb_dim)
-                # Repeat static along the time axis => [batch, 1, stat_emb_dim] -> [batch, seq_length, stat_emb_dim]
-                static_emb = static_part.unsqueeze(1).repeat(1, seq_length, 1)
+                    dynamic_emb = dynamic_flat.reshape(batch_size, seq_length, self.dyn_emb_out_dim)
+                    # Repeat static embedding along the time axis
+                    static_emb = static_part.unsqueeze(1).repeat(1, seq_length, 1)
+                    embedding_reconstructed = torch.cat([dynamic_emb, static_emb], dim=2)
+                else:
+                    # --- Model with only static embedding ---
+                    # The flattened input is [batch, (seq_length * num_dynamic) + stat_emb_out_dim]
+                    # The first part is the raw dynamic input; the second part is the static embedding.
+                    dynamic_part = embedding_input[:, : seq_length * self.num_dynamic]  # [batch, seq_length * num_dynamic]
+                    dynamic_part = dynamic_part.reshape(batch_size, seq_length, self.num_dynamic)
+                    static_part = embedding_input[:, seq_length * self.num_dynamic:]   # [batch, stat_emb_out_dim]
+                    # Replicate the static embedding along the time axis
+                    static_emb = static_part.unsqueeze(1).repeat(1, seq_length, 1)
+                    # Concatenate the raw dynamic input with the static embedding to reconstruct the full embedding.
+                    embedding_reconstructed = torch.cat([dynamic_part, static_emb], dim=2)
 
-                # Concatenate => [batch, seq_length, dyn_emb_dim + stat_emb_dim]
-                embedding_reconstructed = torch.cat([dynamic_emb, static_emb], dim=2)
-                # Permute => [seq_length, batch, dyn_emb_dim + stat_emb_dim]
+                # Permute to [seq_length, batch, features] as expected by the downstream network
                 embedding_reconstructed = embedding_reconstructed.permute(1, 0, 2)
 
-                # Define a hook that overrides the embedding_net output with the reconstructed embedding
+                # Override the embedding_net output using a hook
                 def hook_fn(module: nn.Module, input: Tuple[Tensor], output: Tensor) -> Tensor:
                     return embedding_reconstructed
-                
-                # Attach the hook
+
                 hook_handle = self.original_model.embedding_net.register_forward_hook(hook_fn)
 
-                # Create dummy inputs (their values will be ignored due to the hook)
-                dummy_x_d = torch.zeros(batch_size, self.seq_length, self.num_dynamic, device=embedding_input.device)
+                # Create dummy inputs; their actual values are ignored due to the hook
+                dummy_x_d = torch.zeros(batch_size, seq_length, self.num_dynamic, device=embedding_input.device)
                 dummy_x_s = torch.zeros(batch_size, self.num_static, device=embedding_input.device)
                 inputs = {"x_d": dummy_x_d, "x_s": dummy_x_s}
                 out_dict = self.original_model(inputs)
                 hook_handle.remove()
 
-                # Assume the model output is in out_dict["y_hat"]; take the last time step's prediction.
+                # Return the last time step's prediction
                 return out_dict["y_hat"][:, -1, 0].unsqueeze(1)
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         return WrappedModelEmbedding(
             self.model, 
-            seq_length=self.seq_length,
-            num_dynamic=len(self.dynamic_features),
-            num_static=len(self.static_features)
+            cfg=self.cfg
         ).to(device).eval()
 
     def run_shap(self) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
@@ -219,7 +271,7 @@ class SHAPAnalysis(ExplainabilityBase):
         final_x_d, final_x_s, sample_indices = self.load_and_sample_inputs()
 
         if self.use_embedding:
-            # Get the embedding outputs from embedding_net, then process to flatten.
+            # Get the embedding outputs from embedding_net, then process to flatten
             shap_inputs_array = self._get_embedding_outputs(final_x_d, final_x_s)
             # Now shap_inputs_array is of shape [num_samples, (seq_length * dyn_emb_dim) + stat_emb_dim]
             combined_inputs_tensor = torch.tensor(shap_inputs_array, dtype=torch.float32).to(device)
@@ -401,26 +453,31 @@ class SHAPAnalysis(ExplainabilityBase):
             shap_values (np.ndarray): SHAP values array.
         """
         if self.use_embedding:
-            # In embedding mode, the flattened input dimensions are:
-            # [seq_length * dyn_emb_dim, stat_emb_dim]
+            # In embedding mode, the flattened input dimensions are: [seq_length * dyn_emb_dim, stat_emb_dim]
             dyn_emb_dim = self.model.embedding_net.dynamics_output_size
             stat_emb_dim = self.model.embedding_net.statics_output_size
-
+            logging.info(f"Embedding dimensions: {dyn_emb_dim} dynamic, {stat_emb_dim} static")
+            
             dynamic_shap_values = shap_values[:, :self.seq_length * dyn_emb_dim].reshape(-1, self.seq_length, dyn_emb_dim)
             static_shap_values = shap_values[:, self.seq_length * dyn_emb_dim:]
 
             # Sum dynamic contributions over time and average over samples
-            dynamic_summed_shap = np.sum(np.abs(dynamic_shap_values), axis=1)  # [n_samples, dyn_emb_dim]
-            dynamic_mean_shap = np.mean(dynamic_summed_shap, axis=0)  # [dyn_emb_dim]
+            dynamic_summed_shap = np.sum(dynamic_shap_values, axis=1)  # [n_samples, dyn_emb_dim]
+            dynamic_mean_shap = np.mean(np.abs(dynamic_summed_shap), axis=0)  # [dyn_emb_dim]
             static_mean_shap = np.mean(np.abs(static_shap_values), axis=0).squeeze()  # [stat_emb_dim]
 
-            feature_names = [f"Embed Dyn {i+1}" for i in range(dyn_emb_dim)] + \
-                            [f"Embed Stat {i+1}" for i in range(stat_emb_dim)]
+            # If dyn_emb_dim == len(self.dynamic_features), then there's no real dynamic "embedding"
+            if dyn_emb_dim == len(self.dynamic_features):
+                dynamic_feature_names = self.dynamic_features
+            else:
+                dynamic_feature_names = [f"Embed Dyn {i+1}" for i in range(dyn_emb_dim)]
+
+            static_feature_names = [f"Embed Stat {i+1}" for i in range(stat_emb_dim)]
+
+            feature_names = dynamic_feature_names + static_feature_names
             mean_shap_values = np.concatenate([dynamic_mean_shap, static_mean_shap])
 
-            dynamic_color = 'skyblue'
-            static_color = 'blue'
-            colors = [dynamic_color] * dyn_emb_dim + [static_color] * stat_emb_dim
+            colors = ['skyblue'] * dyn_emb_dim + ['blue'] * stat_emb_dim
         else:
             num_dynamic = len(self.dynamic_features)
             dynamic_shap_values = shap_values[:, :self.seq_length * num_dynamic].reshape(-1, self.seq_length, num_dynamic)
@@ -429,17 +486,12 @@ class SHAPAnalysis(ExplainabilityBase):
             # Sum dynamic contributions across time and average over samples
             dynamic_summed_shap = np.sum(dynamic_shap_values, axis=1) # [n_samples, num_dynamic]
             dynamic_mean_shap = np.mean(np.abs(dynamic_summed_shap), axis=0) # [num_dynamic]
-
-            # combined_static_shap, agg_static_names = self._aggregate_static_features(static_shap_values)
             static_mean_shap = np.mean(np.abs(static_shap_values), axis=0).squeeze()
 
             feature_names = self.dynamic_features + self.static_features
             mean_shap_values = np.concatenate([dynamic_mean_shap, static_mean_shap])
 
-            # Colors for original features.
-            dynamic_color = 'skyblue'
-            static_color = 'blue'
-            colors = [dynamic_color] * len(self.dynamic_features) + [static_color] * len(self.static_features)
+            colors = ['skyblue'] * len(self.dynamic_features) + ['blue'] * len(self.static_features)
 
         # Sort features by mean absolute SHAP value
         sorted_indices = np.argsort(mean_shap_values)[::-1]
@@ -453,9 +505,10 @@ class SHAPAnalysis(ExplainabilityBase):
         plt.title("SHAP Summary Bar Plot")
         plt.gca().invert_yaxis()
 
-        dynamic_patch = mpatches.Patch(color=dynamic_color, label='Embedding Dynamic' if self.use_embedding else 'Dynamic')
-        static_patch = mpatches.Patch(color=static_color, label='Embedding Static' if self.use_embedding else 'Static')
-        plt.legend(handles=[dynamic_patch, static_patch], loc='lower right')
+        plt.legend(
+            handles=[mpatches.Patch(color='skyblue', label='Dynamic' if not self.use_embedding else 'Embedding Dynamic'),
+                     mpatches.Patch(color='blue', label='Static' if not self.use_embedding else 'Embedding Static')], 
+                     loc='lower right')
 
         plot_path = os.path.join(self.results_folder, "shap_summary_bar_plot{}".format(
             "_Embedding.png" if self.use_embedding else ".png"))
@@ -466,7 +519,7 @@ class SHAPAnalysis(ExplainabilityBase):
     def run_shap_visualizations(self, shap_values: np.ndarray, inputs: Dict[str, np.ndarray]) -> None:
         if not self.use_embedding:
             self._plot_shap_summary(shap_values, inputs)
-        self._plot_shap_contributions_over_time(shap_values)
+            self._plot_shap_contributions_over_time(shap_values)
         self._plot_shap_summary_bar(shap_values)
 
 

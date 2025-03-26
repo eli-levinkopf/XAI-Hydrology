@@ -1,3 +1,4 @@
+import gc
 import logging
 import os
 from pathlib import Path
@@ -282,6 +283,7 @@ class ShapClusterAnalyzer:
             max_display=len(feature_names),
             show=False
         )
+        plt.title(f"SHAP Summary for Cluster {cluster_id}")
         summary_path = self.results_folder / f"shap_summary_plot_cluster_{cluster_id}.png"
         plt.savefig(summary_path, bbox_inches="tight", dpi=300)
         plt.close()
@@ -321,7 +323,7 @@ class ShapClusterAnalyzer:
         plt.yticks(y, feature_names, fontsize=6)
         plt.gca().invert_yaxis()
         plt.xlabel("Aggregated SHAP Value")
-        plt.title(f"Feature Importance (Median) for Cluster {cluster_id}")
+        plt.title(f"Feature Importance for Cluster {cluster_id}")
         plt.legend(loc='lower right')
         plt.tight_layout()
         
@@ -400,6 +402,11 @@ class ShapClusterAnalyzer:
                     shap_values, inputs = self.run_shap_for_cluster(cluster_id=cluster_id)
                 self._generate_cluster_shap_plots(shap_values, inputs, cluster_id)
                 results[cluster_id] = shap_values
+
+                del shap_values, inputs
+                gc.collect()
+                torch.cuda.empty_cache()
+
             except ValueError as e:
                 print(f"Error processing cluster {cluster_id}: {str(e)}")
         
@@ -408,5 +415,6 @@ class ShapClusterAnalyzer:
 
 if __name__ == "__main__":
     run_dir = Path("/sci/labs/efratmorin/eli.levinkopf/batch_runs/runs/train_lstm_rs_22_1503_194719/")
-    shap_cluster_analyzer = ShapClusterAnalyzer(run_dir=run_dir, epoch=25, n_clusters=10, reuse_shap=True)
+    shap_cluster_analyzer = ShapClusterAnalyzer(run_dir=run_dir, epoch=25, n_clusters=10, reuse_shap=False)
+    # shap_cluster_analyzer.clusterer.evaluate(output_path=shap_cluster_analyzer.results_folder)
     results = shap_cluster_analyzer.run_all_clusters()
