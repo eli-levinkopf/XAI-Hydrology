@@ -35,11 +35,11 @@ class ExplainabilityBase:
         self.analysis_name = analysis_name
         self.period = period.lower()
 
-        # self.cfg = self._load_config()
         self.cfg = Config(Path(run_dir) / "config.yml")
         self.seq_length = self.cfg.seq_length
         self.dynamic_features = self.cfg.dynamic_inputs
-        self.static_features = self.cfg.static_attributes
+        self.static_features = sorted(self.cfg.static_attributes) # get_dataset returns static features in alphabetical order
+        self.num_dynamic_features = len(self.dynamic_features)
 
         self.model = self._load_model()
         self.results_folder = self._setup_results_folder()
