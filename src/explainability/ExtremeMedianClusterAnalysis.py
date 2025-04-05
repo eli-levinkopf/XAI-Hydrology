@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import pickle
 import logging
 import sys
@@ -15,6 +16,7 @@ from sklearn.decomposition import PCA
 from sklearn.cluster import AgglomerativeClustering, KMeans
 from matplotlib.sankey import Sankey
 from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
+import yaml
 
 from utils.geoutils import plot_clusters_on_world_map
 
@@ -563,61 +565,159 @@ class ExtremeMedianClusterAnalysis:
         csv_path = os.path.join(self.results_folder, "cluster_sizes.csv")
         cluster_sizes.to_csv(csv_path, index=False)
 
-    def _aggregate_raw_data_per_basin(self, condition: str) -> dict:
+    def load_scaler_from_file(self) -> dict:
+        """Loads the scaler dictionary from the run directory.
+        Returns:
+            dict: The scaler dictionary containing means and standard deviations.
         """
-        Aggregates raw input data per basin.
-        
+        scaler_path = Path(self.run_dir) / 'train_data' / 'train_data_scaler.yml'
+        if not scaler_path.is_file():
+            raise FileNotFoundError(f"Scaler file not found at {scaler_path}")
+        with open(scaler_path, 'r') as fp:
+            scaler = yaml.safe_load(fp)
+        return scaler
+
+    def _aggregate_unnormalized_data_per_basin(self, condition: str, basin_id_to_print: Optional[str] = "camelscl_9402001") -> Dict[str, Dict[str, np.ndarray]]:
+        """
+        Aggregates un-normalized input data per basin, calculating both mean and median.
+
         Args:
             condition (str): Either 'extreme' or 'median' indicating the condition.
-            
+            basin_id_to_print (Optional[str]): If provided, print the aggregated mean and median
+                                            for this specific basin for debugging.
+
         Returns:
-            dict[str, np.ndarray]: Mapping from basin ID to aggregated raw data vector.
+            dict: Mapping from basin ID to a dictionary containing 'mean' and 'median'
+                aggregated un-normalized data vectors.
+                Example: {'basin_X': {'mean': np.array([...]), 'median': np.array([...])}}
         """
-        inputs = np.load(os.path.join(self.run_dir, self.period, f"model_epoch{self.epoch:03d}", "shap", f"inputs_{condition}.npz"))
-        x_d = inputs['x_d']              # shape: (n_samples, seq_length, n_dynamic)
-        x_s = inputs['x_s']              # shape: (n_samples, n_static)
-        basin_ids = inputs['basin_ids']  # shape: (n_samples,)
-        
-        # For dynamic data, take the last day's value for each sample.
-        last_day_dyn = x_d[:, -1, :]  # shape: (n_samples, n_dynamic)
-        combined = np.concatenate([last_day_dyn, x_s], axis=1)  # shape: (n_samples, n_dynamic+n_static)
-        
-        df = pd.DataFrame(combined)
+        # Load Normalized Data
+        inputs_path = os.path.join(self.run_dir, self.period, f"model_epoch{self.epoch:03d}", "shap", f"inputs_{condition}.npz")
+        if not os.path.exists(inputs_path):
+            raise FileNotFoundError(f"Inputs file not found for condition '{condition}' at {inputs_path}")
+        inputs = np.load(inputs_path)
+        norm_x_d = inputs['x_d']
+        norm_x_s = inputs['x_s']
+        basin_ids = inputs['basin_ids']
+
+        # Load the Scaler
+        scaler = self.load_scaler_from_file()
+        xarray_center_dict = scaler.get('xarray_feature_center', {})
+        xarray_scale_dict = scaler.get('xarray_feature_scale', {})
+        attribute_means_dict = scaler.get('attribute_means', {})
+        attribute_stds_dict = scaler.get('attribute_stds', {})
+
+        # Get Feature Names and Split into Dynamic and Static
+        data_loader = self.extreme_loader if condition == "extreme" else self.median_loader
+        if not data_loader or not data_loader.feature_names:
+            raise ValueError(f"Feature names not loaded for condition '{condition}'.")
+        num_dynamic_features = norm_x_d.shape[2]
+        dynamic_features = data_loader.feature_names[:num_dynamic_features]
+        static_features = data_loader.feature_names[num_dynamic_features:]
+
+        if len(dynamic_features) + len(static_features) != len(data_loader.feature_names):
+            raise ValueError("Feature name split mismatch.")
+        if len(dynamic_features) != norm_x_d.shape[2] or len(static_features) != norm_x_s.shape[1]:
+            raise ValueError("Feature counts don't match data shapes.")
+
+        # Dynamic feature means and stds
+        dyn_centers = np.zeros(num_dynamic_features)
+        dyn_scales = np.ones(num_dynamic_features)
+        for j, feat_name in enumerate(dynamic_features):
+            center_data = xarray_center_dict.get('data_vars', {}).get(feat_name, {}).get('data')
+            scale_data = xarray_scale_dict.get('data_vars', {}).get(feat_name, {}).get('data')
+            dyn_centers[j] = center_data if center_data is not None else 0.0
+            dyn_scales[j] = scale_data if scale_data is not None and scale_data != 0 else 1.0
+
+        # Static feature means and stds
+        stat_centers = np.zeros(len(static_features))
+        stat_scales = np.ones(len(static_features))
+        for k, feat_name in enumerate(static_features):
+            stat_centers[k] = attribute_means_dict.get(feat_name, 0.0)
+            scale_val = attribute_stds_dict.get(feat_name, 1.0)
+            stat_scales[k] = scale_val if scale_val != 0 else 1.0
+
+        # Un-normalize data sample by sample
+        unnormalized_samples = []
+        last_day_dyn_norm = norm_x_d[:, -1, :]
+        for i in range(len(norm_x_d)):
+            raw_x_d_last_day_i = (last_day_dyn_norm[i] * dyn_scales) + dyn_centers
+            raw_x_s_i = (norm_x_s[i] * stat_scales) + stat_centers
+            unnormalized_combined = np.concatenate([raw_x_d_last_day_i, raw_x_s_i])
+            unnormalized_samples.append(unnormalized_combined)
+        unnormalized_samples = np.array(unnormalized_samples)
+
+        # Aggregate per basin (mean and median)
+        combined_features = dynamic_features + static_features
+        df = pd.DataFrame(unnormalized_samples, columns=combined_features)
         df['basin_id'] = basin_ids
-        grouped = df.groupby('basin_id').median()
-        
-        aggregated_per_basin = {basin: row.values for basin, row in grouped.iterrows()}
+        grouped_stats = df.groupby('basin_id')[combined_features].agg(['mean', 'median'])
+        # grouped_stats DataFrame will have multi-level columns: (feature_name, 'mean') and (feature_name, 'median')
+
+        aggregated_per_basin = {}
+        for basin_id, row in grouped_stats.iterrows():
+            mean_vector = row.loc[(slice(None), 'mean')].values 
+            median_vector = row.loc[(slice(None), 'median')].values
+            aggregated_per_basin[basin_id] = {"mean": mean_vector, "median": median_vector}
+
         return aggregated_per_basin
 
-    def aggregate_raw_data_per_cluster(self, condition, basin_to_cluster: dict[str, int]) -> dict:
+    def aggregate_raw_data_per_cluster(self, condition, basin_to_cluster: dict[str, int]) -> pd.DataFrame:
         """
-        Aggregates basin-level raw data into one representative vector per cluster.
-        The median is computed over all aggregated basin vectors within each cluster.
-        
+        Aggregates basin-level un-normalized data into representative vectors (mean and median)
+        per cluster. Saves the results to a CSV file.
+
         Args:
             condition (str): Either 'extreme' or 'median' indicating the condition.
             basin_to_cluster (dict): Mapping from basin_id to cluster label.
-            
-        Returns:
-            dict: Mapping from cluster label to the aggregated raw data 
-            vector, with features as rows and clusters as columns.
-        """
-        aggregated_per_basin = self._aggregate_raw_data_per_basin(condition)
-        vectors = np.array([aggregated_per_basin[basin_id] for basin_id in self.common_basin_ids])
-        clusters = [basin_to_cluster[basin_id] for basin_id in self.common_basin_ids]
-        
-        df = pd.DataFrame(vectors)
-        df['cluster'] = clusters
 
-        grouped = df.groupby('cluster').median()
+        Returns:
+            pd.DataFrame: DataFrame with features as index and multi-level columns
+                        (ClusterX_mean, ClusterX_median) containing aggregated un-normalized data.
+        """
+        # Get per-basin aggregations
+        aggregation_key_per_basin = 'median' # Choose 'mean' or 'median' per-basin vectors as input
+        aggregated_per_basin_unnormalized = self._aggregate_unnormalized_data_per_basin(condition)
+
+        # Prepare data for cluster aggregation
+        missing_basins = [bid for bid in self.common_basin_ids if bid not in aggregated_per_basin_unnormalized]
+        if missing_basins:
+            logging.warning(f"Missing unnormalized data for basins: {missing_basins}. Excluded.")
+
+        valid_common_basins = [bid for bid in self.common_basin_ids if bid in aggregated_per_basin_unnormalized]
+        if not valid_common_basins:
+            logging.error(f"No common basins with unnormalized data found for '{condition}'. Cannot aggregate.")
+            return pd.DataFrame()
+
+        vectors = np.array([aggregated_per_basin_unnormalized[basin_id][aggregation_key_per_basin]
+                            for basin_id in valid_common_basins])
+        clusters = np.array([basin_to_cluster[basin_id] for basin_id in valid_common_basins])
 
         data_loader = self.extreme_loader if condition == "extreme" else self.median_loader
-        grouped.columns = data_loader.feature_names
-        df_transposed = grouped.T
-        output_file = os.path.join(self.extreme_folder if condition == "extreme" else self.median_folder, f"cluster_aggregated_raw_datd_{condition}.csv")
-        df_transposed.to_csv(output_file, index=True)
-        
-        return df_transposed
+        if not data_loader or not data_loader.feature_names:
+            raise ValueError("Data loader or feature names not available.")
+        feature_names = data_loader.feature_names
+
+        df_cluster_input = pd.DataFrame(vectors, columns=feature_names)
+        df_cluster_input['cluster'] = clusters
+
+        # Calculate mean and median per cluster
+        cluster_means = df_cluster_input.groupby('cluster')[feature_names].mean().T
+        cluster_means.columns = [f"Cluster{c+1}_mean" for c in cluster_means.columns]
+        cluster_medians = df_cluster_input.groupby('cluster')[feature_names].median().T
+        cluster_medians.columns = [f"Cluster{c+1}_median" for c in cluster_medians.columns]
+
+        df_final_output = pd.concat([cluster_means, cluster_medians], axis=1)
+
+        # Sort columns for consistent order (Cluster0_mean, Cluster0_median, Cluster1_mean, ...)
+        df_final_output = df_final_output.sort_index(axis=1)
+
+        output_folder = self.extreme_folder if condition == "extreme" else self.median_folder
+        output_file = os.path.join(output_folder, f"cluster_aggregated_raw_data_{condition}.csv")
+        logging.info(f"Saving cluster aggregated raw data to {output_file}")
+        df_final_output.to_csv(output_file, index=True, index_label="feature")
+
+        return df_final_output
 
     def generate_cluster_visualizations(self, condition: str, analyzer: ClusterAnalyzer, loader: SHAPDataLoader, n_clusters: int) -> None:
         """
@@ -1076,10 +1176,10 @@ def parse_args():
     # Comparative analysis subcommand
     parser_comp = subparsers.add_parser("comparative", parents=[parent_parser],
                                           help="Run clustering on both extreme and median data with provided parameters")
-    parser_comp.add_argument("--extreme_n_clusters", type=int, default=5, help="Number of clusters for extreme conditions.")
-    parser_comp.add_argument("--median_n_clusters", type=int, default=4, help="Number of clusters for median conditions.")
-    parser_comp.add_argument("--extreme_n_dim", type=int, default=4, help="Number of PCA dimensions for extreme conditions.")
-    parser_comp.add_argument("--median_n_dim", type=int, default=4, help="Number of PCA dimensions for median conditions.")
+    parser_comp.add_argument("--extreme_n_clusters", type=int, default=6, help="Number of clusters for extreme conditions.")
+    parser_comp.add_argument("--median_n_clusters", type=int, default=5, help="Number of clusters for median conditions.")
+    parser_comp.add_argument("--extreme_n_dim", type=int, default=36, help="Number of PCA dimensions for extreme conditions.")
+    parser_comp.add_argument("--median_n_dim", type=int, default=35, help="Number of PCA dimensions for median conditions.")
     
     # Optimal parameter search subcommand
     parser_opt = subparsers.add_parser("optimal", parents=[parent_parser],

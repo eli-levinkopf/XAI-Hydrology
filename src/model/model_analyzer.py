@@ -140,3 +140,9 @@ class ModelAnalyzer(BaseModelLoader):
         )
         return inputs
     
+
+if __name__ == "__main__":
+    run_dir = Path("/sci/labs/efratmorin/eli.levinkopf/batch_runs/runs/train_lstm_rs_22_1503_194719")
+    epoch = 25
+    analyzer = ModelAnalyzer(run_dir, epoch)
+    inputs = analyzer.get_dataset()

@@ -7,7 +7,6 @@ from sklearn.cluster import KMeans
 import matplotlib.pyplot as plt
 import umap
 from typing import Any, Dict, Optional
-from tqdm import tqdm
 
 from model.model_analyzer import ModelAnalyzer
 
@@ -189,8 +188,8 @@ class HiddenStateClusterer:
         
         plt.tight_layout()
         if output_path is None:
-            output_path = os.path.join(str(self.run_dir), "evaluation_metrics_range.png")
-        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+            output_path = os.path.join(str(self.run_dir), "evaluation_metrics_k_clusters.png")
+        plt.savefig(os.path.join(output_path, "evaluation_metrics_k_clusters.png"), dpi=300, bbox_inches='tight')
         plt.close()
         
         # Assemble metrics into a dictionary
