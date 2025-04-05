@@ -83,7 +83,7 @@ class ShapClusterAnalyzer:
         self.inputs: Optional[np.ndarray] = None
         self.seq_length = self.cfg.seq_length
         self.dynamic_features = self.cfg.dynamic_inputs
-        self.static_features = self.cfg.static_attributes
+        self.static_features = sorted(self.cfg.static_attributes) # get_dataset returns static features in alphabetical order
         self.results_folder = run_dir / period / f"model_epoch{epoch:03d}" / "shap" / "hidden_clusters"
         os.makedirs(self.results_folder, exist_ok=True)
 
@@ -415,6 +415,6 @@ class ShapClusterAnalyzer:
 
 if __name__ == "__main__":
     run_dir = Path("/sci/labs/efratmorin/eli.levinkopf/batch_runs/runs/train_lstm_rs_22_1503_194719/")
-    shap_cluster_analyzer = ShapClusterAnalyzer(run_dir=run_dir, epoch=25, n_clusters=10, reuse_shap=False)
-    # shap_cluster_analyzer.clusterer.evaluate(output_path=shap_cluster_analyzer.results_folder)
-    results = shap_cluster_analyzer.run_all_clusters()
+    shap_cluster_analyzer = ShapClusterAnalyzer(run_dir=run_dir, epoch=25, n_clusters=10, reuse_shap=True)
+    shap_cluster_analyzer.clusterer.evaluate(k_min=2, k_max=150, output_path=shap_cluster_analyzer.results_folder)
+    #results = shap_cluster_analyzer.run_all_clusters()
