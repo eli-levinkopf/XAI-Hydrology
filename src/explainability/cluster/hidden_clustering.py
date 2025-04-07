@@ -1,5 +1,6 @@
 import logging
 import os
+from sklearn.decomposition import PCA
 from sklearn.metrics import calinski_harabasz_score, davies_bouldin_score, silhouette_score
 import torch
 import numpy as np
@@ -56,8 +57,7 @@ class HiddenStateClusterer:
         """   
         if self.hidden_states is None:
             self.extract_hidden_states()
-
-        hidden_np = self.hidden_states.numpy()
+        hidden_np = self.reduce_dimensionality(n_components=self.pca_dim)
         kmeans = KMeans(
             n_clusters=self.n_clusters, 
             random_state=self.random_state,
@@ -68,22 +68,61 @@ class HiddenStateClusterer:
     
     def reduce_dimensionality(self, n_components: int = 2) -> np.ndarray:
         """
-        Reduce the dimensionality of hidden states for visualization using UMAP.
+        Reduce the dimensionality of hidden states for visualization using PCA.
         
         Args:
-            n_components (int, optional): Number of components for UMAP. Defaults to 2
+            n_components (int, optional): Number of components for PCA. Defaults to 2
             
         Returns:
-            np.ndarray: UMAP-reduced embedding
+            np.ndarray: PCA-reduced embedding
         """
         hidden_np = self.hidden_states.numpy()
-        reducer = umap.UMAP(
-            n_components=n_components, 
-            random_state=self.random_state
-        )
-        self.embedding = reducer.fit_transform(hidden_np)
-        return self.embedding
+        pca = PCA(n_components=n_components)
+        reduced_states = pca.fit_transform(hidden_np)
+        return reduced_states
     
+    def find_optimal_dimensions(self, output_folder: str) -> Dict[str, Any]:
+        """
+        Finds the optimal number of PCA components based on cumulative explained variance.
+
+        Args:
+            output_folder (str): Folder path where the explained variance plot will be saved.
+
+        Returns:
+            Dict: Dictionary with explained variance metrics.
+        """
+        if self.hidden_states is None:
+            self.extract_hidden_states()
+        hidden_np = self.hidden_states.numpy()
+        pca = PCA(n_components=hidden_np.shape[1])
+        pca.fit(hidden_np)
+
+        # Calculate cumulative explained variance
+        cum_explained = np.cumsum(pca.explained_variance_ratio_)
+        n_comp = {
+            'n_components_80': int(np.argmax(cum_explained >= 0.8) + 1),
+            'n_components_90': int(np.argmax(cum_explained >= 0.9) + 1),
+            'n_components_95': int(np.argmax(cum_explained >= 0.95) + 1)
+        }
+
+        colors = {'80%': 'r', '90%': 'g', '95%': 'orange'}
+
+        plt.figure(figsize=(10, 6))
+        plt.plot(range(1, len(cum_explained)+1), cum_explained, 'bo-')
+        plt.xlabel("Number of Principal Components")
+        plt.ylabel("Cumulative Explained Variance")
+        plt.title("PCA Explained Variance")
+
+        for thresh, label in zip([0.8, 0.9, 0.95], ["80%", "90%", "95%"]):
+            plt.axhline(y=thresh, linestyle="--", color=colors[label], label=f"{label} Explained Variance")
+            plt.axvline(x=n_comp[f'n_components_{label[:2]}'], linestyle="--", color=colors[label], alpha=0.3)
+
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_folder, "pca_explained_variance.png"), dpi=300)
+        plt.close()
+
     def plot_clusters(self, output_path: Optional[str] = None) -> None:
         """
         Plot the clusters in a 2D space using UMAP-reduced hidden states.

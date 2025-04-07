@@ -273,7 +273,6 @@ class ExplainabilityBase:
         """
         inputs = self.model_analyzer.get_inputs()
         x_d, x_s = inputs["x_d"], inputs["x_s"]
-        logging.info(f"Before sampling: x_d shape {x_d.shape}, x_s shape {x_s.shape}") # Debugging
         total_samples = x_d.shape[0]
         if self.num_samples < total_samples:
             indices = np.random.choice(total_samples, size=self.num_samples, replace=False)
@@ -283,7 +282,6 @@ class ExplainabilityBase:
             final_x_d = x_d
             final_x_s = x_s
             indices = np.arange(total_samples)
-        logging.info(f"After sampling: final_x_d shape {final_x_d.shape}, final_x_s shape {final_x_s.shape}") # Debugging
         return final_x_d, final_x_s, indices
     
     def _aggregate_static_features(self, values: np.ndarray, x_s: np.ndarray = None) -> tuple[np.ndarray, np.ndarray, list[str]]:

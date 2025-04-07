@@ -577,7 +577,7 @@ class ExtremeMedianClusterAnalysis:
             scaler = yaml.safe_load(fp)
         return scaler
 
-    def _aggregate_unnormalized_data_per_basin(self, condition: str, basin_id_to_print: Optional[str] = "camelscl_9402001") -> Dict[str, Dict[str, np.ndarray]]:
+    def _aggregate_unnormalized_data_per_basin(self, condition: str) -> Dict[str, Dict[str, np.ndarray]]:
         """
         Aggregates un-normalized input data per basin, calculating both mean and median.
 
