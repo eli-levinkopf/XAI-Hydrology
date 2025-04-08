@@ -3,6 +3,7 @@ import logging
 from pathlib import Path
 from typing import Dict
 import numpy as np
+import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -139,10 +140,64 @@ class ModelAnalyzer(BaseModelLoader):
             (f", y shape {y_full.shape}" if fetch_target else "")
         )
         return inputs
+
+    def get_unique_static_inputs(self) -> Dict[str, np.ndarray | pd.Index] | None:
+        """
+        Extracts unique static input features and corresponding basin IDs.
+
+        Returns:
+            dict: {
+                "x_s_unique": np.ndarray of shape [num_basins, S],
+                "basin_ids": pd.Index object containing unique basin IDs
+            }
+            Returns None if lookup_table is not available or data extraction fails.
+        """
+        dataset, _ = self.get_dataset()
+
+        if not hasattr(dataset, 'lookup_table'):
+            logging.error("Dataset object does not have the 'lookup_table' attribute needed to map samples to basin IDs.")
+            return None
+
+        inputs = self.get_inputs(fetch_target=False)
+
+        x_s = inputs['x_s'] # Shape [N_samples, S]
+        num_total_samples = x_s.shape[0]
+        lookup_table = dataset.lookup_table
+
+        try:
+            # Extract basin IDs corresponding to each row in all_x_s
+            basin_ids_per_sample = np.array([lookup_table[i][0] for i in range(num_total_samples)])
+        except IndexError:
+             logging.error("Index error while accessing lookup_table. Ensure it's correctly structured.")
+             return None
+        except Exception as e:
+            logging.error(f"Error processing lookup_table: {e}")
+            return None
+
+        temp_df = pd.DataFrame(x_s)
+        temp_df['basin_id'] = basin_ids_per_sample
+
+        # Keep only the first occurrence of each basin_id
+        unique_rows_df = temp_df.drop_duplicates(subset=['basin_id'], keep='first')
+        basin_ids_unique = pd.Index(unique_rows_df['basin_id'])
+        x_s_unique = unique_rows_df.drop(columns=['basin_id']).values
+        num_unique_basins = x_s_unique.shape[0]
+
+        logging.info(f"Found {num_unique_basins} unique basins.")
+        logging.info(f"Extracted unique static data using lookup_table. Shape: {x_s_unique.shape}")
+
+        # Perform a sanity check on the number of features
+        sorted_static_features = sorted(self.cfg.static_attributes)
+        if x_s_unique.shape[1] != len(sorted_static_features):
+             logging.warning(f"Number of columns in unique static features ({x_s_unique.shape[1]}) "
+                             f"does not match expected number ({len(sorted_static_features)}).")
+
+        return {"x_s_unique": x_s_unique, "basin_ids": basin_ids_unique}
     
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     run_dir = Path("/sci/labs/efratmorin/eli.levinkopf/batch_runs/runs/train_lstm_rs_22_1503_194719")
     epoch = 25
     analyzer = ModelAnalyzer(run_dir, epoch)
-    inputs = analyzer.get_dataset()
+    inputs = analyzer.get_unique_static_inputs()
